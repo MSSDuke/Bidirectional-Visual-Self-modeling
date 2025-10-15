@@ -26,10 +26,13 @@ class MLPBase(nnx.Module):
 # TODO decoder, maybe FiLM layer after MLP?
 
 class SoundSM(nnx.Module):
-    def __init__(self, input_dim=None, output_dim=None, inference_mode=False, params=None):        
+    def __init__(self, input_dim=None, output_dim=None, inference_mode=False, params=None, H=5, T=1):        
         super(SoundSM, self).__init__()
 
         self.conv_encode = ConvEncoder_2D()
+
+        self.state_action_compression = nnx.Linear(H*(len(states)+len(actions))+T*len(actions), T*len(states))
+
         self.mlp = MLPBase()
 
         if params is not None:
