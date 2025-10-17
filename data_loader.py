@@ -1,10 +1,11 @@
 import numpy as np
 import torch
+import torch.nn as nn
 import jax
 import jax.numpy as jnp
 import jax.nn as jnn
 import flax
-import flax.nnx as nnx
+from flax.experimental import nnx
 
 import minari
 

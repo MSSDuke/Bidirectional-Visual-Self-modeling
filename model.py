@@ -1,7 +1,35 @@
 from data_loader import *
 
-states = []
-actions = []
+
+"""
+Helper functions
+"""
+
+def glorot_init_params():
+    """
+    Glorot initialization of network weights
+    """
+    pass
+
+def init_bias(output_dim, dtype=jnp.float32):
+    return jnp.zeros(output_dim, dtype=dtype)
+
+class Mish(nnx.Module):
+    """
+    Mish activation function compatible with Flax NNX
+    """
+    def __call__(x):
+        return jnn.mish(x)
+    
+class Lipschitz(nnx.Module):
+    """
+    Lipschitz normalization for linear layers
+    """
+    def __call__(self, *args, **kwds):
+        return super().__call__(*args, **kwds)
+
+
+
 
 class ConvEncoder_2D(nnx.Module):
     """
@@ -13,28 +41,41 @@ class ConvEncoder_2D(nnx.Module):
     def forward(self, x):
         pass
 
+
 class MLPBase(nnx.Module):
     """
-    MLP with Lipschitz normalization 
+    MLP (maybe include Lipschitz normalization) 
     """
-    def __init__(self, input_dim=None, output_dim=None, H=5, T=1):
+    def __init__(self, input_dim=None, output_dim=None, params=None):
         super(MLPBase, self).__init__()
 
+        self.mlp = nnx.Sequential(
+            nnx.Linear(input_dim, 128),
+            Mish(),
+            Lipschitz(),
+            nnx.Linear(128, 128),
+            Mish(),
+            Lipschitz(),
+            nnx.Linear(128, 128),
+            Mish(),
+            Lipschitz(),
+            nnx.Linear(128, 128),
+            Mish(),
+            Lipschitz(),
+            nnx.Linear(128, output_dim)
+        )
+        
     def forward(self, x):
-        pass
+        return self.mlp(x)
 
 # TODO decoder, maybe FiLM layer after MLP?
 
-class SoundSM(nnx.Module):
+class SoundSM(nn.Module):
     def __init__(self, input_dim=None, output_dim=None, inference_mode=False, params=None, H=5, T=1):        
         super(SoundSM, self).__init__()
 
         self.conv_encode = ConvEncoder_2D()
-
-        self.state_action_compression = nnx.Linear(H*(len(states)+len(actions))+T*len(actions), T*len(states))
-
         self.mlp = MLPBase()
 
-        if params is not None:
-            self.params = params
-            W, _ = self.params
+    def forward(self, x):
+        pass
