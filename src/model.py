@@ -75,5 +75,6 @@ class SoundSM(nnx.Module):
         )
 
     def __call__(self, x):
-        x = self.mlp(x)
+        print("TEST")
+        x = self.dynamics_mlp(x)
         return x

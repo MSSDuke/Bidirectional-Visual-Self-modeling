@@ -168,6 +168,11 @@ def train(model, dataloader, optimizer, epochs, sequence_length=10, log_dir=None
     """
     train_losses = []
     best_loss = float('inf')
+
+    print(f"\nJAX Configuration:")
+    print(f"JAX version: {jax.__version__}")
+    print(f"Devices: {jax.devices()}")
+    print(f"Default backend: {jax.default_backend()}")
     
     print(f"\n{'='*60}")
     print(f"Starting Training")
@@ -176,7 +181,7 @@ def train(model, dataloader, optimizer, epochs, sequence_length=10, log_dir=None
     print(f"Sequence Length: {sequence_length}")
     print(f"Log Directory: {log_dir}")
     print(f"{'='*60}\n")
-    
+        
     for epoch in range(epochs):
         epoch_start_time = time.time()
         epoch_losses = []

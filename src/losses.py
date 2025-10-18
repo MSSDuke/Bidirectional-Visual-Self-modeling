@@ -1,7 +1,7 @@
 from src.data_loader import *
+import optax
 
-
-@jax.jit
+@nnx.jit
 def train_step(model, optimizer, batch):
     """
     Computes loss and gradients for a single training step
@@ -44,6 +44,6 @@ def train_step(model, optimizer, batch):
 
 
     (loss, metrics), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
-    optimizer.update(model=model, grads=grads)
+    optimizer.update(grads)
 
     return loss, metrics

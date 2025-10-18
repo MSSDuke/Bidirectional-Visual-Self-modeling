@@ -40,10 +40,6 @@ class DataLoader():
         
         # Iterate through all episodes
         for episode in self.dataset.iterate_episodes():
-            # Observations are a flat array of shape (episode_length, 105)
-            # According to Ant-v4 docs:
-            # - qpos: indices 0:15 (15 values)
-            # - qvel: indices 15:29 (14 values)
             observations = episode.observations
             actions = episode.actions
             
@@ -67,6 +63,14 @@ class DataLoader():
         # Create combined observation array (qpos + qvel)
         self.observations = np.concatenate([self.qpos, self.qvel], axis=-1)
         
+        self.obs_mean = self.observations.mean(axis=0, keepdims=True)
+        self.obs_std = self.observations.std(axis=0, keepdims=True) + 1e-8
+        self.observations = (self.observations - self.obs_mean) / self.obs_std
+        
+        self.action_mean = self.actions.mean(axis=0, keepdims=True)
+        self.action_std = self.actions.std(axis=0, keepdims=True) + 1e-8
+        self.actions = (self.actions - self.action_mean) / self.action_std
+        
         self.num_samples = len(self.observations)
         
         # Sanity check
@@ -80,6 +84,9 @@ class DataLoader():
         print(f"qvel shape: {self.qvel.shape}")
         print(f"Combined observation shape: {self.observations.shape}")
         print(f"Actions shape: {self.actions.shape}")
+        print(f"Observation stats - mean: {self.obs_mean[0, :5]}, std: {self.obs_std[0, :5]}")
+        print(f"Normalized obs range: [{self.observations.min():.2f}, {self.observations.max():.2f}]")
+        print(f"Normalized action range: [{self.actions.min():.2f}, {self.actions.max():.2f}]")
         
     def __len__(self):
         """Return number of batches."""
@@ -113,7 +120,8 @@ class DataLoader():
             batch_actions = jnp.array(batch_actions)
         
         return batch_obs, batch_actions
-    
+
+
 if __name__ == "__main__":
     # Example usage
     dataloader = DataLoader(dataset, batch_size=128, shuffle=True, use_jax=True)
