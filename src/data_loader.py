@@ -1,20 +1,13 @@
 import numpy as np
 import torch
 import torch.nn as nn
-import jax
-import jax.numpy as jnp
-import jax.nn as jnn
+import jax, jax.numpy as jnp, jax.nn as jnn
 import flax
-from flax.experimental import nnx
+from flax import nnx
 
 import minari
 
 dataset = minari.load_dataset("mujoco/ant/simple-v0", download=True)
-print("Observation space:", dataset.observation_space)
-print("Action space:", dataset.action_space)
-print("Total episodes:", dataset.total_episodes)
-print("Total steps:", dataset.total_steps)
-
 
 """
 Temporary data loader, will be replaced when real-world data is available
@@ -51,15 +44,16 @@ class DataLoader():
             # According to Ant-v4 docs:
             # - qpos: indices 0:15 (15 values)
             # - qvel: indices 15:29 (14 values)
-            # The remaining indices contain other sensor data we don't need
             observations = episode.observations
-            
-            # Extract qpos (first 15 values) and qvel (next 14 values)
-            qpos = observations[:, 0:15]
-            qvel = observations[:, 15:29]
-            
-            # Actions have shape (episode_length, 8)
             actions = episode.actions
+            
+            # CRITICAL: Episodes have N observations but N-1 actions
+            # We need to trim observations to match actions
+            episode_length = len(actions)  # Use action length as reference
+            
+            # Extract qpos and qvel, trimming to match actions
+            qpos = observations[:episode_length, 0:15]
+            qvel = observations[:episode_length, 15:29]
             
             qpos_list.append(qpos)
             qvel_list.append(qvel)
@@ -74,6 +68,11 @@ class DataLoader():
         self.observations = np.concatenate([self.qpos, self.qvel], axis=-1)
         
         self.num_samples = len(self.observations)
+        
+        # Sanity check
+        assert self.observations.shape[0] == self.actions.shape[0], \
+            f"Mismatch: {self.observations.shape[0]} observations vs {self.actions.shape[0]} actions"
+        
         self.indices = np.arange(self.num_samples)
         
         print(f"\nLoaded {self.num_samples} transitions")
@@ -114,18 +113,18 @@ class DataLoader():
             batch_actions = jnp.array(batch_actions)
         
         return batch_obs, batch_actions
-
-
-# Example usage
-dataloader = DataLoader(dataset, batch_size=128, shuffle=True, use_jax=True)
-
-# Iterate through batches
-for batch_idx, (observations, actions) in enumerate(dataloader):
-    print(f"Batch {batch_idx}: obs shape {observations.shape}, actions shape {actions.shape}")
-    if batch_idx >= 2:  # Just show first few batches
-        break
-
-# Or get random batch
-random_indices = np.random.choice(len(dataloader.observations), size=64, replace=False)
-obs_batch, action_batch = dataloader.get_batch(random_indices)
-print(f"\nRandom batch: obs shape {obs_batch.shape}, actions shape {action_batch.shape}")
+    
+if __name__ == "__main__":
+    # Example usage
+    dataloader = DataLoader(dataset, batch_size=128, shuffle=True, use_jax=True)
+    
+    # Iterate through batches
+    for batch_idx, (observations, actions) in enumerate(dataloader):
+        print(f"Batch {batch_idx}: obs shape {observations.shape}, actions shape {actions.shape}")
+        if batch_idx >= 2:  # Just show first few batches
+            break
+    
+    # Or get random batch
+    random_indices = np.random.choice(len(dataloader.observations), size=64, replace=False)
+    obs_batch, action_batch = dataloader.get_batch(random_indices)
+    print(f"\nRandom batch: obs shape {obs_batch.shape}, actions shape {action_batch.shape}")
