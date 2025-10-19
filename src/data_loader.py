@@ -9,23 +9,21 @@ import minari
 
 dataset = minari.load_dataset("mujoco/ant/simple-v0", download=True)
 
-"""
-Temporary data loader, will be replaced when real-world data is available
-"""
-
 class DataLoader():
-    def __init__(self, dataset, batch_size=32, shuffle=True, use_jax=True):
+    def __init__(self, dataset, batch_size=32, sequence_length=10, shuffle=True, use_jax=True):
         """
         DataLoader for MuJoCo Ant dataset from Minari.
         
         Args:
             dataset: Minari dataset object
-            batch_size: Number of transitions per batch
+            batch_size: Number of sequences per batch
+            sequence_length: Length of each sequence
             shuffle: Whether to shuffle the data
             use_jax: If True, return JAX arrays; if False, return NumPy arrays
         """
         self.dataset = dataset
         self.batch_size = batch_size
+        self.sequence_length = sequence_length
         self.shuffle = shuffle
         self.use_jax = use_jax
         
@@ -33,106 +31,149 @@ class DataLoader():
         self._load_data()
         
     def _load_data(self):
-        """Extract qpos, qvel observations and actions from all episodes."""
-        qpos_list = []
-        qvel_list = []
-        actions_list = []
+        """Extract qpos, qvel observations and actions from all episodes, maintaining episode boundaries."""
+        self.episodes = []
         
-        # Iterate through all episodes
+        # Process each episode separately
         for episode in self.dataset.iterate_episodes():
             observations = episode.observations
             actions = episode.actions
             
-            # CRITICAL: Episodes have N observations but N-1 actions
-            # We need to trim observations to match actions
-            episode_length = len(actions)  # Use action length as reference
+            # Episodes have N observations but N-1 actions
+            episode_length = len(actions)
             
-            # Extract qpos and qvel, trimming to match actions
-            qpos = observations[:episode_length, 0:15]
-            qvel = observations[:episode_length, 15:29]
+            # Extract qpos and qvel
+            qpos = observations[:episode_length + 1, 0:15]  # Keep N observations for N-1 actions
+            qvel = observations[:episode_length + 1, 15:29]
             
-            qpos_list.append(qpos)
-            qvel_list.append(qvel)
-            actions_list.append(actions)
+            # Combine observations
+            obs = np.concatenate([qpos, qvel], axis=-1)
+            
+            # Store episode data
+            self.episodes.append({
+                'observations': obs,  # Shape: [episode_length + 1, obs_dim]
+                'actions': actions     # Shape: [episode_length, action_dim]
+            })
         
-        # Concatenate all episodes
-        self.qpos = np.concatenate(qpos_list, axis=0)
-        self.qvel = np.concatenate(qvel_list, axis=0)
-        self.actions = np.concatenate(actions_list, axis=0)
+        # Compute normalization statistics across all episodes
+        all_obs = np.concatenate([ep['observations'][:-1] for ep in self.episodes], axis=0)
+        all_actions = np.concatenate([ep['actions'] for ep in self.episodes], axis=0)
         
-        # Create combined observation array (qpos + qvel)
-        self.observations = np.concatenate([self.qpos, self.qvel], axis=-1)
+        self.obs_mean = all_obs.mean(axis=0, keepdims=True)
+        self.obs_std = all_obs.std(axis=0, keepdims=True) + 1e-8
         
-        self.obs_mean = self.observations.mean(axis=0, keepdims=True)
-        self.obs_std = self.observations.std(axis=0, keepdims=True) + 1e-8
-        self.observations = (self.observations - self.obs_mean) / self.obs_std
+        self.action_mean = all_actions.mean(axis=0, keepdims=True)
+        self.action_std = all_actions.std(axis=0, keepdims=True) + 1e-8
         
-        self.action_mean = self.actions.mean(axis=0, keepdims=True)
-        self.action_std = self.actions.std(axis=0, keepdims=True) + 1e-8
-        self.actions = (self.actions - self.action_mean) / self.action_std
+        # Normalize episode data
+        for ep in self.episodes:
+            ep['observations'] = (ep['observations'] - self.obs_mean) / self.obs_std
+            ep['actions'] = (ep['actions'] - self.action_mean) / self.action_std
         
-        self.num_samples = len(self.observations)
+        # Create valid sequences from episodes
+        self.sequences = []
+        for ep in self.episodes:
+            ep_len = len(ep['actions'])
+            # Extract all possible sequences of length sequence_length from this episode
+            for start_idx in range(ep_len - self.sequence_length + 1):
+                end_idx = start_idx + self.sequence_length
+                seq = {
+                    'states': ep['observations'][start_idx:end_idx + 1],  # T+1 states
+                    'actions': ep['actions'][start_idx:end_idx]            # T actions
+                }
+                self.sequences.append(seq)
         
-        # Sanity check
-        assert self.observations.shape[0] == self.actions.shape[0], \
-            f"Mismatch: {self.observations.shape[0]} observations vs {self.actions.shape[0]} actions"
+        self.num_sequences = len(self.sequences)
+        self.indices = np.arange(self.num_sequences)
         
-        self.indices = np.arange(self.num_samples)
-        
-        print(f"\nLoaded {self.num_samples} transitions")
-        print(f"qpos shape: {self.qpos.shape}")
-        print(f"qvel shape: {self.qvel.shape}")
-        print(f"Combined observation shape: {self.observations.shape}")
-        print(f"Actions shape: {self.actions.shape}")
-        print(f"Observation stats - mean: {self.obs_mean[0, :5]}, std: {self.obs_std[0, :5]}")
-        print(f"Normalized obs range: [{self.observations.min():.2f}, {self.observations.max():.2f}]")
-        print(f"Normalized action range: [{self.actions.min():.2f}, {self.actions.max():.2f}]")
+        print(f"\nLoaded {len(self.episodes)} episodes")
+        print(f"Created {self.num_sequences} sequences of length {self.sequence_length}")
+        print(f"Observation shape: [sequence_length + 1, {self.sequences[0]['states'].shape[1]}]")
+        print(f"Action shape: [sequence_length, {self.sequences[0]['actions'].shape[1]}]")
         
     def __len__(self):
         """Return number of batches."""
-        return (self.num_samples + self.batch_size - 1) // self.batch_size
+        return (self.num_sequences + self.batch_size - 1) // self.batch_size
     
     def __iter__(self):
-        """Iterate over batches."""
+        """Iterate over batches of sequences."""
         if self.shuffle:
             np.random.shuffle(self.indices)
         
-        for start_idx in range(0, self.num_samples, self.batch_size):
-            end_idx = min(start_idx + self.batch_size, self.num_samples)
+        for start_idx in range(0, self.num_sequences, self.batch_size):
+            end_idx = min(start_idx + self.batch_size, self.num_sequences)
             batch_indices = self.indices[start_idx:end_idx]
             
-            batch_obs = self.observations[batch_indices]
-            batch_actions = self.actions[batch_indices]
+            # Collect sequences for this batch
+            batch_states = []
+            batch_actions = []
+            
+            for idx in batch_indices:
+                seq = self.sequences[idx]
+                batch_states.append(seq['states'])
+                batch_actions.append(seq['actions'])
+            
+            # Stack into batch arrays
+            batch_states = np.stack(batch_states, axis=1)  # [T+1, batch, state_dim]
+            batch_actions = np.stack(batch_actions, axis=1)  # [T, batch, action_dim]
             
             if self.use_jax:
-                batch_obs = jnp.array(batch_obs)
+                batch_states = jnp.array(batch_states)
                 batch_actions = jnp.array(batch_actions)
             
-            yield batch_obs, batch_actions
+            yield {
+                'states': batch_states,
+                'actions': batch_actions
+            }
     
-    def get_batch(self, indices):
-        """Get a specific batch by indices."""
-        batch_obs = self.observations[indices]
-        batch_actions = self.actions[indices]
+    def get_random_batch(self, batch_size=None):
+        """Get a random batch of sequences."""
+        if batch_size is None:
+            batch_size = self.batch_size
+            
+        indices = np.random.choice(self.num_sequences, size=min(batch_size, self.num_sequences), replace=False)
+        
+        batch_states = []
+        batch_actions = []
+        
+        for idx in indices:
+            seq = self.sequences[idx]
+            batch_states.append(seq['states'])
+            batch_actions.append(seq['actions'])
+        
+        batch_states = np.stack(batch_states, axis=1)  # [T+1, batch, state_dim]
+        batch_actions = np.stack(batch_actions, axis=1)  # [T, batch, action_dim]
         
         if self.use_jax:
-            batch_obs = jnp.array(batch_obs)
+            batch_states = jnp.array(batch_states)
             batch_actions = jnp.array(batch_actions)
         
-        return batch_obs, batch_actions
+        return {
+            'states': batch_states,
+            'actions': batch_actions
+        }
 
 
 if __name__ == "__main__":
     # Example usage
-    dataloader = DataLoader(dataset, batch_size=128, shuffle=True, use_jax=True)
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=128, 
+        sequence_length=10,
+        shuffle=True, 
+        use_jax=True
+    )
     
     # Iterate through batches
-    for batch_idx, (observations, actions) in enumerate(dataloader):
-        print(f"Batch {batch_idx}: obs shape {observations.shape}, actions shape {actions.shape}")
+    for batch_idx, batch in enumerate(dataloader):
+        print(f"Batch {batch_idx}:")
+        print(f"  States shape: {batch['states'].shape}")
+        print(f"  Actions shape: {batch['actions'].shape}")
         if batch_idx >= 2:  # Just show first few batches
             break
     
-    # Or get random batch
-    random_indices = np.random.choice(len(dataloader.observations), size=64, replace=False)
-    obs_batch, action_batch = dataloader.get_batch(random_indices)
-    print(f"\nRandom batch: obs shape {obs_batch.shape}, actions shape {action_batch.shape}")
+    # Get random batch
+    random_batch = dataloader.get_random_batch(64)
+    print(f"\nRandom batch:")
+    print(f"  States shape: {random_batch['states'].shape}")
+    print(f"  Actions shape: {random_batch['actions'].shape}")

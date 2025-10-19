@@ -21,7 +21,8 @@ def train_step(model, optimizer, batch):
         T = states.shape[0] - 1
 
         def rollout(current_state, t):
-            pred_state = jax.vmap(model.dynamics_mlp)(jnp.concatenate([current_state, actions[t]], axis=-1))
+            pred_state = model(jnp.concatenate([current_state, actions[t]], axis=-1))
+            # pred_state = jax.vmap(model)(jnp.concatenate([current_state, actions[t]], axis=-1))
             true_state = states[t+1]
             step_loss = ((pred_state - true_state)**2).mean()
             return pred_state, step_loss
@@ -44,6 +45,6 @@ def train_step(model, optimizer, batch):
 
 
     (loss, metrics), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
-    optimizer.update(grads)
+    optimizer.update(grads=grads, model=model)
 
     return loss, metrics
