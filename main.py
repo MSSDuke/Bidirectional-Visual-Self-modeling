@@ -162,10 +162,12 @@ def train(model, dataloader, optimizer, epochs, log_dir=None):
     for epoch in range(epochs):
         epoch_start_time = time.time()
         epoch_losses = []
+
+        alpha_d = 1.0 - (epoch/epochs)
         
         for batch_idx, batch in enumerate(dataloader):
             # Training step
-            loss, metrics = train_step(model, optimizer, batch)
+            loss, metrics = train_step(model, optimizer, batch, alpha_d)
             
             # Convert to Python float for logging
             metrics = {k: float(v) for k, v in metrics.items()}

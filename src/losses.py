@@ -2,7 +2,7 @@ from src.data_loader import *
 import optax
 
 @nnx.jit
-def train_step(model, optimizer, batch):
+def train_step(model, optimizer, batch, alpha):
     """
     Computes loss and gradients for a single training step
 
@@ -20,20 +20,32 @@ def train_step(model, optimizer, batch):
         # spectrograms = batch["spectrograms"]
         T = states.shape[0] - 1
 
-        def rollout(current_state, t):
-            pred_state = model(jnp.concatenate([current_state, actions[t]], axis=-1))
-            # pred_state = jax.vmap(model)(jnp.concatenate([current_state, actions[t]], axis=-1))
+        def rollout(current_state, action):
+            pred_delta = model(jnp.concatenate([current_state, action], axis=-1))
+            pred_state = current_state + pred_delta
+            return pred_state
+
+        def one_step_teacher(t, _):
+            pred_delta = model(jnp.concatenate([states[t], actions[t]], axis=-1))
+            pred_state = states[t] + pred_delta
             true_state = states[t+1]
             step_loss = ((pred_state - true_state)**2).mean()
-            return pred_state, step_loss
+            return None, step_loss
 
-        init_d_carry = states[0]
-        (_, step_d_losses) = jax.lax.scan(
-            rollout,
-            init_d_carry,
+        (_, teacher_d_losses) = jax.lax.scan(
+            one_step_teacher,
+            None,
             jnp.arange(T)
         )
-        L_d = step_d_losses.mean()
+        rollout_pred = jax.lax.scan(
+            rollout,
+            states[0],
+            actions
+        )
+        true_future_states = states[1:]
+        rollout_d_losses = ((rollout_pred - true_future_states)**2).mean(axis=(1, 2))
+        L_rd, L_tf = rollout_d_losses.mean(), teacher_d_losses.mean()
+        L_d = alpha*L_tf + (1.0 - alpha)*L_rd
 
         # TODO implement spectrogram
 
