@@ -11,31 +11,64 @@ dataset = minari.load_dataset("mujoco/ant/simple-v0", download=True)
 
 def _coerce_observations(obs_container):
     """
-    Return obs as float32 ndarray of shape [T+1, obs_dim], handling:
-      - dicts with keys like 'qpos'/'qvel' (concatenate),
-      - dicts with 'observation'/'obs'/'state',
-      - plain lists/ndarrays already flattened.
+    Return obs as float32 ndarray with ONLY qpos+qvel (29 dims) when possible.
+    Cases handled:
+      - dicts with 'qpos'/'qvel' -> concatenate to 29
+      - dicts with 'observation' that is itself a dict with qpos/qvel
+      - flat arrays (e.g., 105-d) -> take the first 29 as qpos+qvel
     """
-    # Case 1: dict of arrays
+    # Case 1: dict-like episodes (most Minari datasets)
     if isinstance(obs_container, dict):
-        # Prefer explicit qpos/qvel if available
+        # Preferred path: explicit fields
         if "qpos" in obs_container and "qvel" in obs_container:
             qpos = np.asarray(obs_container["qpos"], dtype=np.float32)
             qvel = np.asarray(obs_container["qvel"], dtype=np.float32)
             return np.concatenate([qpos, qvel], axis=-1)
 
-        # Otherwise, try common flat keys
-        for k in ("observation", "obs", "state"):
+        # Sometimes Minari nests under "observation"
+        if "observation" in obs_container:
+            inner = obs_container["observation"]
+            # If nested dict, try again for qpos/qvel
+            if isinstance(inner, dict):
+                if "qpos" in inner and "qvel" in inner:
+                    qpos = np.asarray(inner["qpos"], dtype=np.float32)
+                    qvel = np.asarray(inner["qvel"], dtype=np.float32)
+                    return np.concatenate([qpos, qvel], axis=-1)
+                # If nested is flat, slice first 29
+                inner_arr = np.asarray(inner, dtype=np.float32)
+                if inner_arr.shape[-1] >= 29:
+                    return inner_arr[..., :29]
+                return inner_arr  # fallback
+
+            # If "observation" is already flat, slice first 29
+            inner_arr = np.asarray(inner, dtype=np.float32)
+            if inner_arr.shape[-1] >= 29:
+                return inner_arr[..., :29]
+            return inner_arr
+
+        # Other common keys (rare here but harmless)
+        for k in ("obs", "state"):
             if k in obs_container:
-                return np.asarray(obs_container[k], dtype=np.float32)
+                arr = np.asarray(obs_container[k], dtype=np.float32)
+                # Try to slice to 29 if it’s a flattened vector
+                if arr.shape[-1] >= 29:
+                    return arr[..., :29]
+                return arr
 
-        # Fall back: pick the first key deterministically and warn
+        # Final fallback: pick a deterministic key, try slice
         first_key = sorted(obs_container.keys())[0]
-        print(f"[data_loader] Warning: using obs['{first_key}'] (available keys: {list(obs_container.keys())})")
-        return np.asarray(obs_container[first_key], dtype=np.float32)
+        arr = np.asarray(obs_container[first_key], dtype=np.float32)
+        if arr.shape[-1] >= 29:
+            return arr[..., :29]
+        return arr
 
-    # Case 2: already an array/list
-    return np.asarray(obs_container, dtype=np.float32)
+    # Case 2: already array-like; try to slice to 29 if possible
+    arr = np.asarray(obs_container, dtype=np.float32)
+    if arr.shape[-1] >= 29:
+        return arr[..., :29]
+    return arr
+
+
 
 
 def build_episodes_from_minari(minari_dataset):

@@ -10,6 +10,24 @@ class Mish(nnx.Module):
     """
     def __call__(self, x):
         return jnn.mish(x)
+    
+class LipschitzNorm(nnx.Module):
+    """
+    Lipschitz regularization for learning smooth neural function
+    """
+    def __init__(self, layer, lipschitz_constant):
+        super(LipschitzNorm, self).__init__()
+        
+        self.layer = layer
+        self.log_c = nnx.Param(jax.nn.softplus(lipschitz_constant))
+
+    def __call__(self):
+        pass
+
+    @staticmethod
+    def calc_lipschitz_constants(self):
+        pass
+
 
 
 class ConvEncoder_2D(nnx.Module):
@@ -39,24 +57,43 @@ class DynamicsNN(nnx.Module):
         hidden_width: width of NN hidden layers
     
     """
-    def __init__(self, state_size=None, action_size=None, hidden_width=512, rngs=None):
+    def __init__(self, state_size=None, action_size=None, hidden_width=256, rngs=None):
         super(DynamicsNN, self).__init__()
 
         input_dim = state_size + action_size # shape=(37,)
         output_dim = state_size # shape=(29,)
 
+        # self.mlp = nnx.Sequential(
+        #     nnx.LipschitzNorm(nnx.Linear(input_dim, hidden_width, rngs=rngs), rngs=rngs),
+        #     Mish(),
+        #     nnx.LipschitzNorm(nnx.Linear(hidden_width, hidden_width, rngs=rngs), rngs=rngs),
+        #     Mish(),
+        #     nnx.LipschitzNorm(nnx.Linear(hidden_width, hidden_width // 2, rngs=rngs), rngs=rngs),
+        #     Mish(),
+        #     nnx.LipschitzNorm(nnx.Linear(hidden_width // 2, hidden_width // 4, rngs=rngs), rngs=rngs),
+        #     Mish(),
+        #     nnx.LipschitzNorm(nnx.Linear(hidden_width // 4, hidden_width // 4, rngs=rngs), rngs=rngs),
+        #     Mish(),
+        #     nnx.LayerNorm(hidden_width // 4, rngs=rngs),
+        #     nnx.Linear(hidden_width // 4, output_dim, rngs=rngs),
+        # )
+
         self.mlp = nnx.Sequential(
-            nnx.SpectralNorm(nnx.Linear(input_dim, hidden_width, rngs=rngs), rngs=rngs),
+            nnx.Linear(input_dim, hidden_width, rngs=rngs),
+            nnx.LayerNorm(hidden_width, rngs=rngs),
             Mish(),
-            nnx.SpectralNorm(nnx.Linear(hidden_width, hidden_width, rngs=rngs), rngs=rngs),
+            nnx.Linear(hidden_width, hidden_width, rngs=rngs),
+            nnx.LayerNorm(hidden_width, rngs=rngs),
             Mish(),
-            nnx.SpectralNorm(nnx.Linear(hidden_width, hidden_width // 2, rngs=rngs), rngs=rngs),
+            nnx.Linear(hidden_width, hidden_width // 2, rngs=rngs),
+            nnx.LayerNorm(hidden_width // 2, rngs=rngs),
             Mish(),
-            nnx.SpectralNorm(nnx.Linear(hidden_width // 2, hidden_width // 4, rngs=rngs), rngs=rngs),
-            Mish(),
-            nnx.SpectralNorm(nnx.Linear(hidden_width // 4, hidden_width // 4, rngs=rngs), rngs=rngs),
-            Mish(),
+            nnx.Linear(hidden_width // 2, hidden_width // 4, rngs=rngs),
             nnx.LayerNorm(hidden_width // 4, rngs=rngs),
+            Mish(),
+            nnx.Linear(hidden_width // 4, hidden_width // 4, rngs=rngs),
+            nnx.LayerNorm(hidden_width // 4, rngs=rngs),
+            Mish(),
             nnx.Linear(hidden_width // 4, output_dim, rngs=rngs),
         )
         
@@ -66,7 +103,7 @@ class DynamicsNN(nnx.Module):
 # TODO audio decoder, maybe FiLM layer after MLP?
 
 class SoundSM(nnx.Module):
-    def __init__(self, state_size=None, action_size=None, hidden_width=512, rngs=None):        
+    def __init__(self, state_size=None, action_size=None, hidden_width=256, rngs=None):        
         super(SoundSM, self).__init__()
 
         self.conv_encode = ConvEncoder_2D(rngs=rngs)

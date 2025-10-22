@@ -20,32 +20,48 @@ def train_step(model, optimizer, batch, alpha):
         # spectrograms = batch["spectrograms"]
         T = states.shape[0] - 1
 
-        def rollout(current_state, action):
-            pred_delta = model(jnp.concatenate([current_state, action], axis=-1))
-            pred_state = current_state + pred_delta
-            return pred_state
+        # jax.debug.print(f"State shape: {states.shape[0]}, Action shape: {actions.shape[0]}")
 
-        def one_step_teacher(t, _):
-            pred_delta = model(jnp.concatenate([states[t], actions[t]], axis=-1))
-            pred_state = states[t] + pred_delta
+        # def rollout(current_state, action):
+        #     pred_delta = model(jnp.concatenate([current_state, action], axis=-1))
+        #     pred_state = current_state + pred_delta
+        #     return pred_state, pred_state
+
+        # def one_step_teacher(_, t):
+        #     pred_delta = model(jnp.concatenate([states[t], actions[t]], axis=-1))
+        #     pred_state = states[t] + pred_delta
+        #     true_state = states[t+1]
+        #     step_loss = ((pred_state - true_state)**2).mean()
+        #     return None, step_loss
+
+        # (_, teacher_d_losses) = jax.lax.scan(
+        #     one_step_teacher,
+        #     None,
+        #     jnp.arange(T)
+        # )
+        # (_, rollout_pred) = jax.lax.scan(
+        #     rollout,
+        #     states[0],
+        #     actions
+        # )
+        # true_future_states = states[1:]
+        # rollout_d_losses = ((rollout_pred - true_future_states)**2).mean(axis=(1, 2))
+        # L_rd, L_tf = rollout_d_losses.mean(), teacher_d_losses.mean()
+        # L_d = alpha*L_tf + (1.0 - alpha)*L_rd
+
+        def rollout(current_state, t):
+            pred_state = model(jnp.concatenate([current_state, actions[t]], axis=-1))
             true_state = states[t+1]
             step_loss = ((pred_state - true_state)**2).mean()
-            return None, step_loss
+            return pred_state, step_loss
 
-        (_, teacher_d_losses) = jax.lax.scan(
-            one_step_teacher,
-            None,
+        init_d_carry = states[0]
+        (_, step_d_losses) = jax.lax.scan(
+            rollout,
+            init_d_carry,
             jnp.arange(T)
         )
-        rollout_pred = jax.lax.scan(
-            rollout,
-            states[0],
-            actions
-        )
-        true_future_states = states[1:]
-        rollout_d_losses = ((rollout_pred - true_future_states)**2).mean(axis=(1, 2))
-        L_rd, L_tf = rollout_d_losses.mean(), teacher_d_losses.mean()
-        L_d = alpha*L_tf + (1.0 - alpha)*L_rd
+        L_d = step_d_losses.mean()
 
         # TODO implement spectrogram
 

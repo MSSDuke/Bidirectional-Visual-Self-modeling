@@ -42,6 +42,7 @@ def plot_losses(train_losses, log_dir, epoch):
     total_losses = [loss['L'] for loss in train_losses]
     dynamics_losses = [loss['L_d'] for loss in train_losses]
     spectrogram_losses = [loss['L_s'] for loss in train_losses]
+    # validation_losses = [loss['L_v'] for loss in train_losses]
     
     # Total loss
     axes[0, 0].plot(epochs, total_losses, 'b-', alpha=0.7, label='Total Loss')
@@ -69,10 +70,10 @@ def plot_losses(train_losses, log_dir, epoch):
     
     # Loss components stacked
     axes[1, 1].plot(epochs, total_losses, 'b-', alpha=0.7, label='Total')
-    axes[1, 1].plot(epochs, dynamics_losses, 'r-', alpha=0.7, label='Dynamics')
+    axes[1, 1].plot(epochs, dynamics_losses, 'r-', alpha=0.7, label='Validation')
     axes[1, 1].set_xlabel('Epoch')
     axes[1, 1].set_ylabel('Loss')
-    axes[1, 1].set_title('All Loss Components')
+    axes[1, 1].set_title('Validation & Total Loss Components')
     axes[1, 1].grid(True, alpha=0.3)
     axes[1, 1].legend()
     axes[1, 1].set_yscale('log')  # Log scale for better visualization
@@ -174,7 +175,7 @@ def train(model, dataloader, optimizer, epochs, log_dir=None):
             epoch_losses.append(metrics)
             
             # Print progress every 10 batches
-            if batch_idx % 1000 == 0:
+            if batch_idx % 10000 == 0:
                 print(f"Epoch {epoch+1}, Batch {batch_idx}: Loss = {metrics['L']:.6f}")
         
         # Average metrics across batches
