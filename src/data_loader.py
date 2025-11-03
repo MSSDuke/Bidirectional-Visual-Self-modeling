@@ -1,3 +1,4 @@
+from __future__ import annotations
 import numpy as np
 import torch
 import torch.nn as nn
@@ -5,250 +6,146 @@ import jax, jax.numpy as jnp, jax.nn as jnn
 import flax
 from flax import nnx
 
-import minari
+from pathlib import Path
 
-dataset = minari.load_dataset("mujoco/ant/simple-v0", download=True)
+def _resize_hw(x: np.ndarray, new_h: int, new_w: int) -> np.ndarray:
+    H, W = x.shape[0], x.shape[1]
+    ih = (np.arange(new_h) * (H / new_h)).astype(np.int32)
+    iw = (np.arange(new_w) * (W / new_w)).astype(np.int32)
+    return x[ih][:, iw]
 
-def _coerce_observations(obs_container):
+class NPZSequenceDatasetJAX:
     """
-    Return obs as float32 ndarray with ONLY qpos+qvel (29 dims) when possible.
-    Cases handled:
-      - dicts with 'qpos'/'qvel' -> concatenate to 29
-      - dicts with 'observation' that is itself a dict with qpos/qvel
-      - flat arrays (e.g., 105-d) -> take the first 29 as qpos+qvel
+    Loads .npz with:
+      states:       (N, D)
+      actions:      (N, A)
+      spectrograms: (N, H, W, 3)
+
+    Builds sequence starts per 512-step episode, so each sample returns:
+      states_seq:  [S+1, D]
+      actions_seq: [S,   A]
+      specs_seq:   [S,   3, H, W]   (CHW)
     """
-    # Case 1: dict-like episodes (most Minari datasets)
-    if isinstance(obs_container, dict):
-        # Preferred path: explicit fields
-        if "qpos" in obs_container and "qvel" in obs_container:
-            qpos = np.asarray(obs_container["qpos"], dtype=np.float32)
-            qvel = np.asarray(obs_container["qvel"], dtype=np.float32)
-            return np.concatenate([qpos, qvel], axis=-1)
-
-        # Sometimes Minari nests under "observation"
-        if "observation" in obs_container:
-            inner = obs_container["observation"]
-            # If nested dict, try again for qpos/qvel
-            if isinstance(inner, dict):
-                if "qpos" in inner and "qvel" in inner:
-                    qpos = np.asarray(inner["qpos"], dtype=np.float32)
-                    qvel = np.asarray(inner["qvel"], dtype=np.float32)
-                    return np.concatenate([qpos, qvel], axis=-1)
-                # If nested is flat, slice first 29
-                inner_arr = np.asarray(inner, dtype=np.float32)
-                if inner_arr.shape[-1] >= 29:
-                    return inner_arr[..., :29]
-                return inner_arr  # fallback
-
-            # If "observation" is already flat, slice first 29
-            inner_arr = np.asarray(inner, dtype=np.float32)
-            if inner_arr.shape[-1] >= 29:
-                return inner_arr[..., :29]
-            return inner_arr
-
-        # Other common keys (rare here but harmless)
-        for k in ("obs", "state"):
-            if k in obs_container:
-                arr = np.asarray(obs_container[k], dtype=np.float32)
-                # Try to slice to 29 if it’s a flattened vector
-                if arr.shape[-1] >= 29:
-                    return arr[..., :29]
-                return arr
-
-        # Final fallback: pick a deterministic key, try slice
-        first_key = sorted(obs_container.keys())[0]
-        arr = np.asarray(obs_container[first_key], dtype=np.float32)
-        if arr.shape[-1] >= 29:
-            return arr[..., :29]
-        return arr
-
-    # Case 2: already array-like; try to slice to 29 if possible
-    arr = np.asarray(obs_container, dtype=np.float32)
-    if arr.shape[-1] >= 29:
-        return arr[..., :29]
-    return arr
-
-
-
-
-def build_episodes_from_minari(minari_dataset):
-    """
-    Extract episodes as plain numpy arrays (observations, actions).
-
-    Ensures:
-      obs: [T+1, obs_dim]
-      acts: [T,   act_dim]
-    If lengths mismatch, truncate conservatively to align (Minari should usually be aligned).
-    """
-    episodes = []
-    for idx, ep in enumerate(minari_dataset.iterate_episodes()):
-        obs = _coerce_observations(ep.observations)         # [T+1, obs_dim] or [T, obs_dim]
-        acts = np.asarray(ep.actions, dtype=np.float32)     # [T, act_dim]
-
-        # Align lengths safely
-        # Expect obs_len = acts_len + 1; otherwise, truncate to the shortest consistent pair.
-        obs_len = obs.shape[0]
-        act_len = acts.shape[0]
-        if obs_len != act_len + 1:
-            # Try to coerce to aligned lengths
-            T = min(act_len, max(0, obs_len - 1))
-            if T == 0:
-                print(f"[data_loader] Warning: episode {idx} too short after alignment; skipping.")
-                continue
-            obs = obs[:T + 1]
-            acts = acts[:T]
-
-        episodes.append({"observations": obs, "actions": acts})
-
-    if not episodes:
-        raise RuntimeError("[data_loader] No usable episodes found after parsing/alignment.")
-    # Optional: brief summary
-    o_dim = episodes[0]["observations"].shape[-1]
-    a_dim = episodes[0]["actions"].shape[-1]
-    print(f"[data_loader] Parsed {len(episodes)} episodes | obs_dim={o_dim} act_dim={a_dim}")
-    return episodes
-
-
-class DataLoader:
     def __init__(
         self,
-        dataset,
-        batch_size=32,
-        sequence_length=10,
-        shuffle=True,
-        use_jax=True,
-        # episode-split + normalization controls:
-        episodes=None,
-        episode_indices=None,
-        norm_stats=None,           # (obs_mean, obs_std, action_mean, action_std)
-        fit_normalization=True,    # compute stats from selected episodes
+        path_like: str | Path,
+        steps_per_episode: int = 512,
+        sequence_length: int = 10,
+        normalize_sa: bool = True,
+        specs_scale_01: bool = True,
+        specs_downsample_hw: tuple[int, int] | None = None,
     ):
-        self.batch_size = int(batch_size)
-        self.sequence_length = int(sequence_length)
-        self.shuffle = bool(shuffle)
-        self.use_jax = bool(use_jax)
+        self.path = Path(path_like)
+        self.E = int(steps_per_episode)
+        self.S = int(sequence_length)
+        self.normalize_sa = bool(normalize_sa)
+        self.specs_scale_01 = bool(specs_scale_01)
+        self.specs_downsample_hw = specs_downsample_hw
 
-        # 1) materialize episodes once
-        if episodes is None:
-            episodes = build_episodes_from_minari(dataset)
+        npz_path = self.path if self.path.is_file() else (self.path / "rollout.npz")
+        with np.load(npz_path, allow_pickle=False) as f:
+            states = f["states"].astype(np.float32, copy=False)
+            actions = f["actions"].astype(np.float32, copy=False)
+            if "spectrograms" not in f.files:
+                raise ValueError("spectrograms missing in npz.")
+            specs = f["spectrograms"]  # (N,H,W,3) uint8/float
 
-        # 2) restrict to selected split
-        if episode_indices is not None:
-            episodes = [episodes[i] for i in episode_indices]
-        self.episodes = episodes
+        # align to whole episodes
+        N = min(states.shape[0], actions.shape[0], specs.shape[0])
+        n_eps = N // self.E
+        if n_eps <= 0:
+            raise ValueError("Not enough steps for a full episode.")
+        N_use = n_eps * self.E
+        states, actions, specs = states[:N_use], actions[:N_use], specs[:N_use]
 
-        # 3) normalization (train computes; val/test reuse)
-        if fit_normalization and norm_stats is None:
-            all_obs = np.concatenate([ep["observations"][:-1] for ep in self.episodes], axis=0)  # [sum(T), D]
-            all_actions = np.concatenate([ep["actions"] for ep in self.episodes], axis=0)        # [sum(T), A]
-            self.obs_mean = all_obs.mean(axis=0, keepdims=True)
-            self.obs_std  = all_obs.std(axis=0, keepdims=True) + 1e-8
-            self.action_mean = all_actions.mean(axis=0, keepdims=True)
-            self.action_std  = all_actions.std(axis=0, keepdims=True) + 1e-8
+        # optional downsample once
+        if self.specs_downsample_hw is not None:
+            new_h, new_w = self.specs_downsample_hw
+            out = np.empty((specs.shape[0], new_h, new_w, specs.shape[3]), dtype=specs.dtype)
+            for i in range(specs.shape[0]):
+                out[i] = _resize_hw(specs[i], new_h, new_w)
+            specs = out
+
+        self.states, self.actions, self.specs = states, actions, specs
+        self.D, self.A = states.shape[1], actions.shape[1]
+        self.H, self.W = specs.shape[1], specs.shape[2]
+
+        # normalization stats
+        if self.normalize_sa:
+            self.obs_mean = states.mean(axis=0, keepdims=True)
+            self.obs_std  = states.std(axis=0, keepdims=True) + 1e-8
+            self.act_mean = actions.mean(axis=0, keepdims=True)
+            self.act_std  = actions.std(axis=0, keepdims=True) + 1e-8
         else:
-            if norm_stats is None:
-                raise ValueError("norm_stats must be provided when fit_normalization=False")
-            self.obs_mean, self.obs_std, self.action_mean, self.action_std = norm_stats
+            self.obs_mean = np.zeros((1, self.D), np.float32)
+            self.obs_std  = np.ones((1, self.D),  np.float32)
+            self.act_mean = np.zeros((1, self.A), np.float32)
+            self.act_std  = np.ones((1, self.A),  np.float32)
 
-        # 4) apply normalization to a copy of episode arrays
-        norm_eps = []
-        for ep in self.episodes:
-            obs = (ep["observations"] - self.obs_mean) / self.obs_std
-            act = (ep["actions"] - self.action_mean) / self.action_std
-            norm_eps.append({"observations": obs.astype(np.float32),
-                             "actions": act.astype(np.float32)})
-        self.episodes = norm_eps
+        # valid starts per episode (need S+1 states)
+        starts = []
+        for e in range(n_eps):
+            base = e * self.E
+            max_start = self.E - (self.S + 1)
+            for s in range(max_start + 1):
+                starts.append(base + s)
+        self.starts = np.asarray(starts, dtype=np.int64)
 
-        # 5) slice each episode into overlapping sequences (time-first)
-        #    each seq: states [S+1, D], actions [S, A]
-        S = self.sequence_length
-        self.sequences = []
-        for ep in self.episodes:
-            obs = ep["observations"]  # [Te+1, D]
-            act = ep["actions"]       # [Te,   A]
-            Te = act.shape[0]
-            if Te < S:
-                continue
-            for start in range(Te - S + 1):
-                end = start + S
-                self.sequences.append({
-                    "states":  obs[start:end+1, :],  # [S+1, D]
-                    "actions": act[start:end,   :],  # [S,   A]
-                })
-
-        # 6) index list for batching
-        self.indices = np.arange(len(self.sequences), dtype=np.int64)
-        self._reset_epoch_permutation()
-
-    def _reset_epoch_permutation(self):
-        self._perm = self.indices.copy()
-        if self.shuffle:
-            rng = np.random.default_rng()
-            rng.shuffle(self._perm)
-        self._cursor = 0
-
-    def __len__(self):
-        # number of full batches (drop last)
-        if self.batch_size <= 0:
-            return 0
-        return len(self.sequences) // self.batch_size
-
-    def __iter__(self):
-        self._reset_epoch_permutation()
-        B = self.batch_size
-        while self._cursor + B <= len(self._perm):
-            batch_idx = self._perm[self._cursor:self._cursor+B]
-            self._cursor += B
-
-            # gather sequences
-            seqs = [self.sequences[i] for i in batch_idx]
-            # stack with TIME FIRST, then BATCH
-            states  = np.stack([s["states"]  for s in seqs], axis=1)  # [S+1, B, D]
-            actions = np.stack([s["actions"] for s in seqs], axis=1)  # [S,   B, A]
-
-            # ensure exact dtypes/shapes; NO leading singleton axes
-            states  = states.astype(np.float32, copy=False)
-            actions = actions.astype(np.float32, copy=False)
-
-            yield {"states": states, "actions": actions}
-
-    # convenience for quick probes
-    def get_random_batch(self, batch_size=None):
-        B = batch_size or self.batch_size
-        rng = np.random.default_rng()
-        if len(self.sequences) < B:
-            raise RuntimeError(f"Not enough sequences ({len(self.sequences)}) for batch_size={B}")
-        idx = rng.choice(len(self.sequences), size=B, replace=False)
-        seqs = [self.sequences[i] for i in idx]
-        states  = np.stack([s["states"]  for s in seqs], axis=1)  # [S+1, B, D]
-        actions = np.stack([s["actions"] for s in seqs], axis=1)  # [S,   B, A]
-        return {"states": states.astype(np.float32), "actions": actions.astype(np.float32)}
+    def __len__(self): return self.starts.shape[0]
 
     def get_norm_stats(self):
-        return (self.obs_mean, self.obs_std, self.action_mean, self.action_std)
+        return (self.obs_mean.copy(), self.obs_std.copy(),
+                self.act_mean.copy(), self.act_std.copy())
 
+    def __getitem__(self, i: int) -> dict[str, jnp.ndarray]:
+        s0 = int(self.starts[i])
 
+        st = self.states[s0:s0+self.S+1]
+        st = (st - self.obs_mean) / self.obs_std
+        st = st.astype(np.float32, copy=False)
 
-if __name__ == "__main__":
-    # Example usage
-    dataloader = DataLoader(
-        dataset, 
-        batch_size=128, 
-        sequence_length=10,
-        shuffle=True, 
-        use_jax=True
-    )
-    
-    # Iterate through batches
-    for batch_idx, batch in enumerate(dataloader):
-        print(f"Batch {batch_idx}:")
-        print(f"  States shape: {batch['states'].shape}")
-        print(f"  Actions shape: {batch['actions'].shape}")
-        if batch_idx >= 2:  # Just show first few batches
-            break
-    
-    # Get random batch
-    random_batch = dataloader.get_random_batch(64)
-    print(f"\nRandom batch:")
-    print(f"  States shape: {random_batch['states'].shape}")
-    print(f"  Actions shape: {random_batch['actions'].shape}")
+        ac = self.actions[s0:s0+self.S]
+        ac = (ac - self.act_mean) / self.act_std
+        ac = ac.astype(np.float32, copy=False)
+
+        sp = self.specs[s0:s0+self.S].astype(np.float32, copy=False)
+        if self.specs_scale_01: sp = sp / 255.0
+        sp = np.transpose(sp, (0, 3, 1, 2))  # T,C,H,W
+
+        return {
+            "states": jnp.asarray(st),          # [S+1,D]
+            "actions": jnp.asarray(ac),         # [S,A]
+            "spectrograms": jnp.asarray(sp),    # [S,3,H,W]
+        }
+
+class JAXEpochLoader:
+    """
+    Finite, epoch-style iterator with attributes for logging.
+    Yields time-major, batched JAX arrays:
+      states:  [S+1, B, D]
+      actions: [S,   B, A]
+      specs:   [S,   B, 3, H, W]
+    """
+    def __init__(self, dataset: NPZSequenceDatasetJAX, batch_size: int, shuffle: bool = True, seed: int = 0):
+        self.dataset = dataset
+        self.batch_size = int(batch_size)
+        self.sequence_length = int(dataset.S)
+        self.shuffle = bool(shuffle)
+        self.rng = np.random.default_rng(seed)
+        self.indices = np.arange(len(dataset), dtype=np.int64)
+
+    def __len__(self):
+        return len(self.indices) // self.batch_size  # drop last
+
+    def __iter__(self):
+        if self.shuffle:
+            self.rng.shuffle(self.indices)
+        B = self.batch_size
+        for start in range(0, len(self), 1):
+            idx = self.indices[start*B:(start+1)*B]
+            samples = [self.dataset[int(i)] for i in idx]
+            # stack to time-major
+            st = jnp.stack([s["states"] for s in samples], axis=1)        # [S+1,B,D]
+            ac = jnp.stack([s["actions"] for s in samples], axis=1)       # [S,B,A]
+            sp = jnp.stack([s["spectrograms"] for s in samples], axis=1)  # [S,B,3,H,W]
+            yield {"states": st, "actions": ac, "spectrograms": sp}

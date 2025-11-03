@@ -12,8 +12,127 @@ import optax
 import matplotlib.pyplot as plt
 
 from src.model import SoundSM
-from src.data_loader import DataLoader, dataset
+from src.data_loader import NPZSequenceDatasetJAX, JAXEpochLoader
 from src.losses import train_step
+
+import pickle
+from pathlib import Path
+import numpy as np
+
+def load_all_shards(path_like):
+    path = Path(path_like)
+
+    def _load_npz_list(npz_paths):
+        states_list, actions_list, specs_list = [], [], []
+        for p in npz_paths:
+            with np.load(p, allow_pickle=False) as a:
+                states_list.append(a["states"])
+                actions_list.append(a["actions"])
+                # spectrograms may be empty (shape (0,)), skip those
+                if "spectrograms" in a.files:
+                    specs_arr = a["spectrograms"]
+                    if specs_arr.ndim > 1 and specs_arr.size > 0:
+                        specs_list.append(specs_arr)
+        states = np.concatenate(states_list, axis=0) if states_list else np.empty((0,0), dtype=np.float32)
+        actions = np.concatenate(actions_list, axis=0) if actions_list else np.empty((0,0), dtype=np.float32)
+        spectrograms = np.concatenate(specs_list, axis=0) if specs_list else np.empty((0,), dtype=np.uint8)
+        return states, actions, spectrograms
+
+    if path.is_file():
+        # single-file case: rollout.npz
+        with np.load(path, allow_pickle=False) as a:
+            states = a["states"]
+            actions = a["actions"]
+            if "spectrograms" in a.files and a["spectrograms"].ndim > 1 and a["spectrograms"].size > 0:
+                spectrograms = a["spectrograms"]
+            else:
+                spectrograms = np.empty((0,), dtype=np.uint8)
+        return states, actions, spectrograms
+
+    # directory case: prefer shards; fall back to single rollout.npz if present
+    shard_paths = sorted(path.glob("rollout_shard_*.npz"))
+    if shard_paths:
+        return _load_npz_list(shard_paths)
+
+    single = path / "rollout.npz"
+    if single.exists():
+        return load_all_shards(single)
+
+    raise FileNotFoundError(
+        f"No dataset found in {path}. "
+        "Looked for rollout_shard_*.npz and rollout.npz."
+    )
+
+
+# s, a, spec = load_all_shards("data/Ant-v5/2025-10-25_13-19-10_seed42/rollout.npz")
+# print(f"State shape: {s.shape}, Action shape: {a.shape}, Spec shape: {spec.shape}")
+
+# from src.model import SoundNN
+# from src.losses import sound_error
+
+# parser = argparse.ArgumentParser(description='Train Acoustic Self-Model')
+# parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
+# parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+# parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
+# parser.add_argument('--seq_len', type=int, default=10, help='Sequence length for rollout')
+# parser.add_argument('--hidden_width', type=int, default=256, help='Hidden layer width')
+# parser.add_argument('--seed', type=int, default=42, help='Random seed')
+# args = parser.parse_args()
+    
+# np.random.seed(args.seed)
+# key = jax.random.PRNGKey(args.seed)
+
+# npz_path = "data/Ant-v5/2025-10-25_13-19-10_seed42/rollout.npz"
+
+# dataset = NPZSequenceDatasetJAX(
+#     npz_path,
+#     steps_per_episode=512,
+#     sequence_length=args.seq_len,
+#     normalize_sa=True,
+#     specs_scale_01=True,
+#     specs_downsample_hw=(128, 128)
+# )
+# dataloader = JAXEpochLoader(dataset, batch_size=args.batch_size, shuffle=True, seed=args.seed)
+
+# rngs = nnx.Rngs(0)
+# model = SoundNN(128, (128, 128, 3), rngs=rngs)
+
+# optimizer = nnx.Optimizer(model, optax.adam(learning_rate=1e-3), wrt=nnx.Param)
+
+# for epoch in range(50):
+#     epoch_losses = []
+    
+#     for batch in dataloader:
+#         x = batch["spectrograms"]
+                
+#         T, B, C, H, W = x.shape
+#         x = x.reshape(T * B, C, H, W)
+#         x = jnp.transpose(x, (0, 2, 3, 1))
+                
+#         loss, grads = nnx.value_and_grad(sound_error)(model, x)
+#         optimizer.update(grads=grads, model=model)
+#         epoch_losses.append(float(loss))
+    
+#     avg_loss = np.mean(epoch_losses)
+#     print(f"Epoch {epoch + 1}/50, Avg Loss: {avg_loss:.6f}")
+
+# save_dir = Path("checkpoints")
+# save_dir.mkdir(exist_ok=True)
+
+# model_state = nnx.state(model)
+
+# with open(save_dir / "sound_autoencoder.pkl", "wb") as f:
+#     pickle.dump(model_state, f)
+
+# print(f"Model saved to {save_dir / 'sound_autoencoder.pkl'}")
+
+
+
+
+
+
+
+
 
 
 # TODO replace temp-GPT main.py later
@@ -222,118 +341,103 @@ def train(model, dataloader, optimizer, epochs, log_dir=None):
     return train_losses
 
 
-def main():
-    # Parse arguments
-    parser = argparse.ArgumentParser(description='Train Acoustic Self-Model')
-    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
-    parser.add_argument('--seq_len', type=int, default=10, help='Sequence length for rollout')
-    parser.add_argument('--hidden_width', type=int, default=256, help='Hidden layer width')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    args = parser.parse_args()
+# def main():
+#     # Parse arguments
+#     parser = argparse.ArgumentParser(description='Train Acoustic Self-Model')
+#     parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
+#     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+#     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
+#     parser.add_argument('--seq_len', type=int, default=10, help='Sequence length for rollout')
+#     parser.add_argument('--hidden_width', type=int, default=256, help='Hidden layer width')
+#     parser.add_argument('--seed', type=int, default=42, help='Random seed')
+#     args = parser.parse_args()
     
-    # Set random seeds
-    np.random.seed(args.seed)
-    key = jax.random.PRNGKey(args.seed)
+#     # Set random seeds
+#     np.random.seed(args.seed)
+#     key = jax.random.PRNGKey(args.seed)
     
-    # Create log directory
-    log_dir = create_log_dir()
+#     # Create log directory
+#     log_dir = create_log_dir()
     
-    # Save config
-    config = vars(args)
-    with open(log_dir / "config.txt", 'w') as f:
-        for k, v in config.items():
-            f.write(f"{k}: {v}\n")
+#     # Save config
+#     config = vars(args)
+#     with open(log_dir / "config.txt", 'w') as f:
+#         for k, v in config.items():
+#             f.write(f"{k}: {v}\n")
     
-    print(f"\n{'='*60}")
-    print(f"Initializing Training")
-    print(f"{'='*60}")
-    
-    # Create dataloader with sequence support
-    print("\nLoading dataset...")
-    dataloader = DataLoader(
-        dataset, 
-        batch_size=args.batch_size,
-        sequence_length=args.seq_len,
-        shuffle=True, 
-        use_jax=True
-    )
-    
-    # Get dimensions from a sample batch
-    sample_batch = dataloader.get_random_batch(batch_size=2)
-    state_size = sample_batch['states'].shape[-1]  # Should be 29
-    action_size = sample_batch['actions'].shape[-1]  # Should be 8
-    
-    print(f"\nData dimensions:")
-    print(f"State size: {state_size}")
-    print(f"Action size: {action_size}")
-    print(f"Sample batch shapes:")
-    print(f"  States: {sample_batch['states'].shape} (T+1, batch, state_dim)")
-    print(f"  Actions: {sample_batch['actions'].shape} (T, batch, action_dim)")
-    
-    # Initialize model
-    print("\nInitializing model...")
-    rngs = nnx.Rngs(args.seed)
+#     print(f"\n{'='*60}")
+#     print(f"Initializing Training")
+#     print(f"{'='*60}")
 
-    model = SoundSM(
-        state_size=state_size,
-        action_size=action_size,
-        hidden_width=args.hidden_width,
-        rngs=rngs
-    )
+#     # Path to your saved rollout (either the file or the run directory)
+#     npz_path = "data/Ant-v5/2025-10-25_13-19-10_seed42/rollout.npz"  # <- adjust
+
+#     # Build dataset and epoch loader (time-major, no cross-episode)
+#     dataset = NPZSequenceDatasetJAX(
+#         npz_path,
+#         steps_per_episode=512,
+#         sequence_length=args.seq_len,
+#         normalize_sa=True,
+#         specs_scale_01=True,
+#         specs_downsample_hw=(128, 128),   # optional, speeds up training
+#     )
+#     dataloader = JAXEpochLoader(dataset, batch_size=args.batch_size, shuffle=True, seed=args.seed)
+
     
-    # Initialize optimizer
-    print("Initializing optimizer...")
-    learning_rate = args.lr
-    optimizer = nnx.Optimizer(model, optax.adam(learning_rate), wrt=nnx.Param)
+#     sample_iter = iter(dataloader)
+#     sample_batch = next(sample_iter)
+#     state_size = sample_batch['states'].shape[-1]   # 29
+#     action_size = sample_batch['actions'].shape[-1] # 8
+
+#     print(f"\nData dimensions:")
+#     print(f"State size: {state_size}")
+#     print(f"Action size: {action_size}")
+#     print(f"Sample batch shapes:")
+#     print(f"  States:  {sample_batch['states'].shape}  (T+1, B, D)")
+#     print(f"  Actions: {sample_batch['actions'].shape} (T,   B, A)")
+#     print(f"  Specs:   {sample_batch['spectrograms'].shape} (T, B, 3, H, W)")
     
-    # Count parameters
-    param_count = sum(x.size for x in jax.tree_util.tree_leaves(nnx.state(model)))
-    print(f"\nModel initialized with {param_count:,} parameters")
+#     # Initialize model
+#     print("\nInitializing model...")
+#     rngs = nnx.Rngs(args.seed)
+
+#     model = SoundSM(
+#         state_size=state_size,
+#         action_size=action_size,
+#         hidden_width=args.hidden_width,
+#         rngs=rngs
+#     )
     
-    # Quick gradient check
-    print("\nPerforming gradient check...")
-    test_batch = dataloader.get_random_batch(batch_size=4)
+#     # Initialize optimizer
+#     print("Initializing optimizer...")
+#     learning_rate = args.lr
+#     optimizer = nnx.Optimizer(model, optax.adam(learning_rate), wrt=nnx.Param)
     
-    def test_loss(model):
-        states = test_batch['states']
-        actions = test_batch['actions']
-        inputs = jnp.concatenate([states[0], actions[0]], axis=-1)
-        pred = model(inputs)
-        return ((pred - states[1]) ** 2).mean()
+#     # Count parameters
+#     param_count = sum(x.size for x in jax.tree_util.tree_leaves(nnx.state(model)))
+#     print(f"\nModel initialized with {param_count:,} parameters")
     
-    loss_val, grads = nnx.value_and_grad(test_loss)(model)
-    grad_norm = jax.tree_util.tree_reduce(
-        lambda acc, x: acc + (x ** 2).sum(),
-        grads,
-        0.0
-    )
-    print(f"Test loss: {loss_val:.6f}")
-    print(f"Gradient norm: {jnp.sqrt(grad_norm):.6f}")
+#     # Train
+#     train_losses = train(
+#         model=model,
+#         dataloader=dataloader,
+#         optimizer=optimizer,
+#         epochs=args.epochs,
+#         log_dir=log_dir
+#     )
     
-    if grad_norm < 1e-10:
-        print("WARNING: Gradients are nearly zero! Check model architecture.")
+#     # Final save
+#     if log_dir:
+#         save_checkpoint(model, optimizer, args.epochs, train_losses, log_dir)
     
-    # Train
-    train_losses = train(
-        model=model,
-        dataloader=dataloader,
-        optimizer=optimizer,
-        epochs=args.epochs,
-        log_dir=log_dir
-    )
-    
-    # Final save
-    if log_dir:
-        save_checkpoint(model, optimizer, args.epochs, train_losses, log_dir)
-    
-    print(f"\n{'='*60}")
-    print(f"Training Complete!")
-    print(f"Logs saved to: {log_dir}")
-    print(f"Final training loss: {train_losses[-1]['L']:.6f}" if train_losses else "No losses recorded")
-    print(f"{'='*60}\n")
+#     print(f"\n{'='*60}")
+#     print(f"Training Complete!")
+#     print(f"Logs saved to: {log_dir}")
+#     print(f"Final training loss: {train_losses[-1]['L']:.6f}" if train_losses else "No losses recorded")
+#     print(f"{'='*60}\n")
 
 
-if __name__ == "__main__":
-    main()
+
+# if __name__ == "__main__":
+#     # main()
+#     pass

@@ -1,120 +1,100 @@
 from src.data_loader import *
 
-"""
-Helper functions
-"""
-
 class Mish(nnx.Module):
     """
     Mish activation
     """
     def __call__(self, x):
         return jnn.mish(x)
-    
-class LipschitzNorm(nnx.Module):
-    """
-    Lipschitz regularization for learning smooth neural function
-    """
-    def __init__(self, layer, lipschitz_constant):
-        super(LipschitzNorm, self).__init__()
+
+
+class SoundNN(nnx.Module):
+    def __init__(self, latent_dim, input_shape, rngs):
+        """
+        Args:
+            latent_dim: size of latent bottleneck
+            input_shape: Shape of input (height, width, channels) e.g. (80, 100, 3)
+            rngs: Random number generators
+        """
+        self.rngs = rngs
+        self.latent_dim = latent_dim
         
-        self.layer = layer
-        self.log_c = nnx.Param(jax.nn.softplus(lipschitz_constant))
-
-    def __call__(self):
-        pass
-
-    @staticmethod
-    def calc_lipschitz_constants(self):
-        pass
-
-
-
-class ConvEncoder_2D(nnx.Module):
-    """
-    Encodes spectrogram data with 2D convolutions
-    """
-    def __init__(self, input_dim=None, output_dim=None, rngs=None):
-        super(ConvEncoder_2D, self).__init__()
-
-        # TODO IMPLEMENT
-
-    def __call__(self, x):
-        pass
-
-# TODO maybe eventually scale to multi-step rollout predictions
-
-class DynamicsNN(nnx.Module):
-    """
-    Learn mapping from state-action history to future states after rollout
-    of some action trajectory
-
-    Args:
-        state_size: dimensionality of state space
-        action_size: dimensionality of action space
-        H: state-action history length (in timesteps) # TODO add later
-        T: action trajectory length (in timesteps) # TODO add later
-        hidden_width: width of NN hidden layers
-    
-    """
-    def __init__(self, state_size=None, action_size=None, hidden_width=256, rngs=None):
-        super(DynamicsNN, self).__init__()
-
-        input_dim = state_size + action_size # shape=(37,)
-        output_dim = state_size # shape=(29,)
-
-        # self.mlp = nnx.Sequential(
-        #     nnx.LipschitzNorm(nnx.Linear(input_dim, hidden_width, rngs=rngs), rngs=rngs),
-        #     Mish(),
-        #     nnx.LipschitzNorm(nnx.Linear(hidden_width, hidden_width, rngs=rngs), rngs=rngs),
-        #     Mish(),
-        #     nnx.LipschitzNorm(nnx.Linear(hidden_width, hidden_width // 2, rngs=rngs), rngs=rngs),
-        #     Mish(),
-        #     nnx.LipschitzNorm(nnx.Linear(hidden_width // 2, hidden_width // 4, rngs=rngs), rngs=rngs),
-        #     Mish(),
-        #     nnx.LipschitzNorm(nnx.Linear(hidden_width // 4, hidden_width // 4, rngs=rngs), rngs=rngs),
-        #     Mish(),
-        #     nnx.LayerNorm(hidden_width // 4, rngs=rngs),
-        #     nnx.Linear(hidden_width // 4, output_dim, rngs=rngs),
-        # )
-
-        self.mlp = nnx.Sequential(
-            nnx.Linear(input_dim, hidden_width, rngs=rngs),
-            nnx.LayerNorm(hidden_width, rngs=rngs),
-            Mish(),
-            nnx.Linear(hidden_width, hidden_width, rngs=rngs),
-            nnx.LayerNorm(hidden_width, rngs=rngs),
-            Mish(),
-            nnx.Linear(hidden_width, hidden_width // 2, rngs=rngs),
-            nnx.LayerNorm(hidden_width // 2, rngs=rngs),
-            Mish(),
-            nnx.Linear(hidden_width // 2, hidden_width // 4, rngs=rngs),
-            nnx.LayerNorm(hidden_width // 4, rngs=rngs),
-            Mish(),
-            nnx.Linear(hidden_width // 4, hidden_width // 4, rngs=rngs),
-            nnx.LayerNorm(hidden_width // 4, rngs=rngs),
-            Mish(),
-            nnx.Linear(hidden_width // 4, output_dim, rngs=rngs),
+        self.encoder = nnx.Sequential(
+            nnx.Conv(in_features=3, out_features=32, kernel_size=(3, 3), strides=(2, 2), rngs=rngs),
+            nnx.relu,
+            nnx.Conv(in_features=32, out_features=64, kernel_size=(3, 3), strides=(2, 2), rngs=rngs),
+            nnx.relu,
+            nnx.Conv(in_features=64, out_features=64, kernel_size=(3, 3), strides=(2, 2), rngs=rngs),
+            nnx.relu,
+            nnx.Conv(in_features=64, out_features=64, kernel_size=(3, 3), strides=(2, 2), rngs=rngs),
+            nnx.relu,
+            nnx.Conv(in_features=64, out_features=64, kernel_size=(3, 3), strides=(2, 2), rngs=rngs)
         )
+
+        # TODO change this dummy calculation and explicitly update for proper dimension
+
+        dummy_input = jnp.ones((1, *input_shape))
+        encoded = self.encoder(dummy_input)
+        self.encoded_shape = encoded.shape[1:]
+        flat_dim = jnp.prod(jnp.array(self.encoded_shape))
         
-    def __call__(self, x):
-        return self.mlp(x)
+        self.encode_dense = nnx.Linear(flat_dim, latent_dim, rngs=rngs)
+        self.decode_dense = nnx.Linear(latent_dim, flat_dim, rngs=rngs)
 
-# TODO audio decoder, maybe FiLM layer after MLP?
-
-class SoundSM(nnx.Module):
-    def __init__(self, state_size=None, action_size=None, hidden_width=256, rngs=None):        
-        super(SoundSM, self).__init__()
-
-        self.conv_encode = ConvEncoder_2D(rngs=rngs)
-
-        self.dynamics_mlp = DynamicsNN(
-            state_size=state_size,
-            action_size=action_size,
-            hidden_width=hidden_width,
-            rngs=rngs
+        self.decoder = nnx.Sequential(
+            nnx.ConvTranspose(in_features=64, out_features=64, kernel_size=(3, 3), strides=(2, 2), rngs=rngs),
+            nnx.relu,
+            nnx.ConvTranspose(in_features=64, out_features=64, kernel_size=(3, 3), strides=(2, 2), rngs=rngs),
+            nnx.relu,
+            nnx.ConvTranspose(in_features=64, out_features=64, kernel_size=(3, 3), strides=(2, 2), rngs=rngs),
+            nnx.relu,
+            nnx.ConvTranspose(in_features=64, out_features=32, kernel_size=(3, 3), strides=(2, 2), rngs=rngs),
+            nnx.relu,
+            nnx.ConvTranspose(in_features=32, out_features=3, kernel_size=(3, 3), strides=(2, 2), rngs=rngs)
         )
 
     def __call__(self, x):
-        x = self.dynamics_mlp(x)
+        batch_size = x.shape[0]
+        
+        x = self.encoder(x)
+        x_flat = x.reshape((batch_size, -1))
+        latent = self.encode_dense(x_flat)
+        x = self.decode_dense(latent)
+        x = x.reshape((batch_size, *self.encoded_shape))
+        x = self.decoder(x)
+        
+        return x, latent
+
+class Action2Sound(nnx.Module):
+    def __init__(self, sound_autoencoder, rngs):
+        """
+        Args:
+            sound_autoencoder: pre-trained autoencoder for spectrogram <-> latent
+        """
+
+        self.sound_net = nnx.Sequential(
+
+        )
+
+        self.decode = sound_autoencoder.decoder
+
+class Sound2Action(nnx.Module):
+    def __init__(self, sound_autoencoder, rngs):
+        """
+        Args:
+            sound_autoencoder: pre-trained autoencoder for spectrogram <-> latent
+        """
+
+        self.encode = sound_autoencoder.encoder
+
+        self.action_net = nnx.Sequential(
+            
+        )
+
+
+class AcousticModel(nnx.Module):
+    def __init__(self, rngs):
+        super(AcousticModel, self).__init__()
+
+    def __call__(self, x):
         return x
