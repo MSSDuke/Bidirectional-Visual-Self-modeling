@@ -2,7 +2,7 @@ from src.data_loader import *
 import optax
 
 def sound_error(model, x):
-    out, _ = model(x)
+    out = model(x)
     return jnp.mean((out - x)**2).mean()
 
 
