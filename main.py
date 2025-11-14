@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 
 from src.model import AcousticModel, SoundAE, Action2Sound, Sound2Action
 from src.data_loader import NPZSequenceDatasetJAX, JAXEpochLoader
+from src.data_collector import run_data_collection
 from src.losses import train_step
 
 import pickle
@@ -642,6 +643,27 @@ def train_sound2action(args):
     print(f"{'='*60}\n")
 
 
+# def main():
+#     parser = argparse.ArgumentParser(description='Train Action2Sound or Sound2Action Model')
+#     parser.add_argument('--mode', type=str, choices=['a2s', 's2a'], default='a2s',
+#                        help='Training mode: a2s (Action2Sound) or s2a (Sound2Action)')
+#     parser.add_argument('--data_path', type=str, 
+#                        default="data/Ant-v5/2025-10-25_13-19-10_seed42/rollout.npz",
+#                        help='Path to dataset')
+#     parser.add_argument('--ae_checkpoint', type=str,
+#                        default="checkpoints/sound_autoencoder_best.pkl",
+#                        help='Path to pretrained autoencoder')
+#     parser.add_argument('--epochs', type=int, default=200, help='Number of epochs')
+#     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
+#     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
+#     parser.add_argument('--seq_len', type=int, default=10, help='Sequence length')
+#     parser.add_argument('--latent_dim', type=int, default=128, help='Latent dimension')
+#     parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    
+#     args = parser.parse_args()
+    
+#     train_sound2action(args)
+
 def main():
     parser = argparse.ArgumentParser(description='Train Action2Sound or Sound2Action Model')
     parser.add_argument('--mode', type=str, choices=['a2s', 's2a'], default='a2s',
@@ -661,7 +683,7 @@ def main():
     
     args = parser.parse_args()
     
-    train_sound2action(args)
+    run_data_collection()
 
 
 if __name__ == "__main__":

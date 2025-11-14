@@ -3,41 +3,27 @@ import random
 import time
 import argparse
 import yaml
+from pathlib import Path
+from PIL import Image
 from dataclasses import dataclass
 os.environ["MUJOCO_GL"] = "egl"
 
 import gymnasium as gym
+from huggingface_sb3 import load_from_hub
+from stable_baselines3 import SAC
 import numpy as np
 import torch
 import torch.nn as nn
 
-env = gym.make('Ant-v5', render_mode='rgb_array')
-
-joint_limits = {
-    "fl_hip": {-1.0, 1.0},
-    "fr_hip": {-1.0, 1.0},
-    "rl_hip": {-1.0, 1.0},
-    "rr_hip": {-1.0, 1.0},
-    "fl_leg": {-1.0, 1.0},
-    "fr_leg": {-1.0, 1.0},
-    "rl_leg": {-1.0, 1.0},
-    "rr_leg": {-1.0, 1.0}
-}
-
-def sample_env_action(env):
-    # Temp sample action func
-    low, high = env.action_space.low, env.action_space.high
-    return np.random.uniform(low=low, high=high).astype(env.action_space.dtype)
-
-
-def get_random_action():
-    low = np.array([limit[0] for limit in joint_limits.values()])
-    high = np.array([limit[1] for limit in joint_limits.values()])
-    action = np.random.uniform(low=low, high=high).astype(np.float32)
-    return action
+env = gym.make("Ant-v5", xml_file="/home/michaelscherk/Desktop/SoundSM/ant_m.xml", render_mode="rgb_array", width=128, height=128)
+model_path = load_from_hub(
+	repo_id="farama-minari/Ant-v5-SAC-medium",
+	filename="ant-v5-sac-medium.zip",
+)
+model = SAC.load(model_path)
 
 class DataCollector():
-    def __init__(self, env=env, steps_per_episode=512, n_steps=100000, Hz=10):
+    def __init__(self, env=env, model=model, steps_per_episode=512, n_steps=100000, Hz=10):
         """
         Data collection agent
 
@@ -48,6 +34,7 @@ class DataCollector():
             Hz: frequency at which to sample from env
         """
         self.env = env
+        self.model = model
         self.n_steps = n_steps
         self.steps_per_episode = steps_per_episode
         self.Hz = Hz
@@ -91,15 +78,15 @@ class DataCollector():
 
         while step < self.n_steps:
             state = self._get_qpos_qvel()
-            step_action = sample_env_action(self.env)
-            _, _, terminated, truncated, info = self.env.step(step_action)
+            step_action, _ = self.model.predict(state_env, deterministic=True)
+            state_env, _, terminated, truncated, info = self.env.step(step_action)
 
             self.states[step] = state
             self.actions[step] = step_action
             self.term[step] = bool(terminated)
             self.trun[step] = bool(truncated)
 
-            if (step % 5000 == 0):
+            if (step % 100 == 0):
                 print(f"Step {step}/{self.n_steps}")
 
             if (episode_step % self.capture_every) == 0:
@@ -136,9 +123,17 @@ def make_run_dir(base="data", env_id="Ant-v5", seed=0):
     return run_dir
 
 def save_dataset(run_dir, dataset, meta=None):
-    run_dir = pathlib.Path(run_dir)
+    run_dir = Path(run_dir)
     specs = dataset.get("spectrograms", [])
+
     if len(specs) > 0:
+        frames_dir = run_dir / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+
+        for i, frame in enumerate(specs):
+            img = Image.fromarray(frame.astype(np.uint8))
+            img.save(frames_dir / f"frame_{i:06d}.png")
+
         specs_arr = np.stack(specs).astype(np.uint8)
     else:
         specs_arr = np.empty((0,), dtype=np.uint8)
@@ -147,11 +142,10 @@ def save_dataset(run_dir, dataset, meta=None):
         run_dir / "rollout.npz",
         states=dataset["states"],
         actions=dataset["actions"],
-        spectrograms=specs_arr
+        spectrograms=specs_arr,
     )
 
     if meta is not None:
-        import json
         with open(run_dir / "meta.json", "w") as f:
             json.dump(meta, f, indent=2)
 
@@ -170,8 +164,8 @@ def load_dataset(run_dir):
 
 
 def run_data_collection():
-    seed = 42
-    dc = DataCollector(env, steps_per_episode=512, n_steps=10_000, Hz=16)
+    seed = 13
+    dc = DataCollector(env, model, steps_per_episode=512, n_steps=10_000, Hz=16)
     dataset = dc.collect(seed=seed)
 
     meta = {
