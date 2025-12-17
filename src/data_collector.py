@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-env = gym.make("Ant-v5", xml_file="/home/michaelscherk/Desktop/SoundSM/ant_m.xml", render_mode="rgb_array", width=128, height=128)
+env = gym.make("Ant-v5", xml_file="/home/mss131/SoundSM/ant_m.xml", render_mode="rgb_array", width=128, height=128)
 model_path = load_from_hub(
 	repo_id="farama-minari/Ant-v5-SAC-medium",
 	filename="ant-v5-sac-medium.zip",
@@ -69,7 +69,8 @@ class DataCollector():
 
     def collect(self, seed=0):
         """
-        Collects env data for: joint_states, actions, spectrograms
+        Collects env data for: joint_states, actions, spectrograms (NOTE we don't
+        actually use joint_states)
         """
         state_env, info = self.env.reset(seed=seed)
 
@@ -160,11 +161,8 @@ def load_dataset(run_dir):
 
 
 
-
-
-
 def run_data_collection():
-    seed = 13
+    seed = np.random.randint
     dc = DataCollector(env, model, steps_per_episode=512, n_steps=10_000, Hz=16)
     dataset = dc.collect(seed=seed)
 

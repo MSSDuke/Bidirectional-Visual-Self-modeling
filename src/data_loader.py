@@ -48,9 +48,8 @@ class NPZSequenceDatasetJAX:
             actions = f["actions"].astype(np.float32, copy=False)
             if "spectrograms" not in f.files:
                 raise ValueError("spectrograms missing in npz.")
-            specs = f["spectrograms"]  # (N,H,W,3) uint8/float
+            specs = f["spectrograms"]
 
-        # align to whole episodes
         N = min(states.shape[0], actions.shape[0], specs.shape[0])
         n_eps = N // self.E
         if n_eps <= 0:
@@ -58,7 +57,6 @@ class NPZSequenceDatasetJAX:
         N_use = n_eps * self.E
         states, actions, specs = states[:N_use], actions[:N_use], specs[:N_use]
 
-        # optional downsample once
         if self.specs_downsample_hw is not None:
             new_h, new_w = self.specs_downsample_hw
             out = np.empty((specs.shape[0], new_h, new_w, specs.shape[3]), dtype=specs.dtype)
@@ -70,19 +68,17 @@ class NPZSequenceDatasetJAX:
         self.D, self.A = states.shape[1], actions.shape[1]
         self.H, self.W = specs.shape[1], specs.shape[2]
 
-        # normalization stats
         if self.normalize_sa:
             self.obs_mean = states.mean(axis=0, keepdims=True)
-            self.obs_std  = states.std(axis=0, keepdims=True) + 1e-8
+            self.obs_std = states.std(axis=0, keepdims=True) + 1e-8
             self.act_mean = actions.mean(axis=0, keepdims=True)
-            self.act_std  = actions.std(axis=0, keepdims=True) + 1e-8
+            self.act_std = actions.std(axis=0, keepdims=True) + 1e-8
         else:
             self.obs_mean = np.zeros((1, self.D), np.float32)
-            self.obs_std  = np.ones((1, self.D),  np.float32)
+            self.obs_std = np.ones((1, self.D), np.float32)
             self.act_mean = np.zeros((1, self.A), np.float32)
-            self.act_std  = np.ones((1, self.A),  np.float32)
+            self.act_std = np.ones((1, self.A), np.float32)
 
-        # valid starts per episode (need S+1 states)
         starts = []
         for e in range(n_eps):
             base = e * self.E
@@ -110,12 +106,12 @@ class NPZSequenceDatasetJAX:
 
         sp = self.specs[s0:s0+self.S].astype(np.float32, copy=False)
         if self.specs_scale_01: sp = sp / 255.0
-        sp = np.transpose(sp, (0, 3, 1, 2))  # T,C,H,W
+        sp = np.transpose(sp, (0, 3, 1, 2))
 
         return {
-            "states": jnp.asarray(st),          # [S+1,D]
-            "actions": jnp.asarray(ac),         # [S,A]
-            "spectrograms": jnp.asarray(sp),    # [S,3,H,W]
+            "states": jnp.asarray(st),
+            "actions": jnp.asarray(ac),
+            "spectrograms": jnp.asarray(sp),
         }
 
 class JAXEpochLoader:
@@ -135,7 +131,7 @@ class JAXEpochLoader:
         self.indices = np.arange(len(dataset), dtype=np.int64)
 
     def __len__(self):
-        return len(self.indices) // self.batch_size  # drop last
+        return len(self.indices) // self.batch_size
 
     def __iter__(self):
         if self.shuffle:
@@ -144,8 +140,7 @@ class JAXEpochLoader:
         for start in range(0, len(self), 1):
             idx = self.indices[start*B:(start+1)*B]
             samples = [self.dataset[int(i)] for i in idx]
-            # stack to time-major
-            st = jnp.stack([s["states"] for s in samples], axis=1)        # [S+1,B,D]
-            ac = jnp.stack([s["actions"] for s in samples], axis=1)       # [S,B,A]
-            sp = jnp.stack([s["spectrograms"] for s in samples], axis=1)  # [S,B,3,H,W]
+            st = jnp.stack([s["states"] for s in samples], axis=1)
+            ac = jnp.stack([s["actions"] for s in samples], axis=1)
+            sp = jnp.stack([s["spectrograms"] for s in samples], axis=1)
             yield {"states": st, "actions": ac, "spectrograms": sp}

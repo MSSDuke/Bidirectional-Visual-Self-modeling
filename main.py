@@ -11,10 +11,10 @@ from flax import nnx
 import optax
 import matplotlib.pyplot as plt
 
-from src.model import AcousticModel, SoundAE, Action2Sound, Sound2Action
+from src.model import SoundAE, Action2Sound, Sound2Action
 from src.data_loader import NPZSequenceDatasetJAX, JAXEpochLoader
 from src.data_collector import run_data_collection
-from src.losses import train_step
+from src.losses import train_step, a2s_loss, s2a_loss
 
 import pickle
 from pathlib import Path
@@ -29,7 +29,6 @@ def load_all_shards(path_like):
             with np.load(p, allow_pickle=False) as a:
                 states_list.append(a["states"])
                 actions_list.append(a["actions"])
-                # spectrograms may be empty (shape (0,)), skip those
                 if "spectrograms" in a.files:
                     specs_arr = a["spectrograms"]
                     if specs_arr.ndim > 1 and specs_arr.size > 0:
@@ -40,7 +39,6 @@ def load_all_shards(path_like):
         return states, actions, spectrograms
 
     if path.is_file():
-        # single-file case: rollout.npz
         with np.load(path, allow_pickle=False) as a:
             states = a["states"]
             actions = a["actions"]
@@ -50,7 +48,6 @@ def load_all_shards(path_like):
                 spectrograms = np.empty((0,), dtype=np.uint8)
         return states, actions, spectrograms
 
-    # directory case: prefer shards; fall back to single rollout.npz if present
     shard_paths = sorted(path.glob("rollout_shard_*.npz"))
     if shard_paths:
         return _load_npz_list(shard_paths)
@@ -78,9 +75,7 @@ def load_pretrained_autoencoder(checkpoint_path="checkpoints/sound_autoencoder_b
 
     nnx.update(ae, saved_state)
 
-    # --- Freeze all parameters recursively ---
     def freeze_tree(tree):
-        """Convert all nnx.Param leaves into nnx.Variable (non-trainable)."""
         if isinstance(tree, nnx.Param):
             return nnx.Variable(tree.value)
         elif isinstance(tree, dict):
@@ -92,59 +87,7 @@ def load_pretrained_autoencoder(checkpoint_path="checkpoints/sound_autoencoder_b
 
     frozen_state = freeze_tree(nnx.state(ae))
     nnx.update(ae, frozen_state)
-
-    print(f"✓ Loaded pretrained autoencoder from {checkpoint_path}")
-    print(f"✓ Autoencoder parameters FROZEN (not trainable)")
-
     return ae
-
-
-
-def a2s_loss(model, batch):
-    """
-    Compute loss for Action2Sound model
-    
-    Args:
-        model: Action2Sound model
-        batch: Dict with 'states', 'actions', 'spectrograms'
-    
-    Returns:
-        loss: MSE between predicted and true spectrograms
-    """
-    states = batch["states"]  # (T+1, B, state_dim)
-    actions = batch["actions"]  # (T, B, action_dim)
-    spectrograms = batch["spectrograms"]  # (T, B, C, H, W)
-    
-    T, B = actions.shape[:2]
-    
-    # Concatenate state + action for each timestep
-    # Use states[:-1] to match action timesteps
-    state_action = jnp.concatenate([states[:-1], actions], axis=-1)  # (T, B, state_dim + action_dim)
-    
-    # Reshape spectrograms: (T, B, C, H, W) -> (T*B, H, W, C)
-    C, H, W = spectrograms.shape[2:]
-    specs_reshaped = spectrograms.reshape(T * B, C, H, W)
-    specs_reshaped = jnp.transpose(specs_reshaped, (0, 2, 3, 1))  # (T*B, H, W, C)
-    
-    # Reshape state_action for model: (T, B, features) -> (B, T, features)
-    state_action = jnp.transpose(state_action, (1, 0, 2))  # (B, T, features)
-    
-    # Predict spectrograms
-    pred_specs = []
-    for b in range(B):
-        pred = model(state_action[b:b+1])  # (1, H, W, C)
-        pred_specs.append(pred)
-    
-    pred_specs = jnp.concatenate(pred_specs, axis=0)  # (B, H, W, C)
-    
-    # For now, let's predict the final spectrogram in the sequence
-    # Take the last spectrogram from each sequence
-    target_specs = specs_reshaped.reshape(T, B, H, W, C)[-1]  # (B, H, W, C)
-    
-    # MSE loss
-    loss = jnp.mean((pred_specs - target_specs) ** 2)
-    
-    return loss
 
 
 def evaluate(model, loader, max_batches=None):
@@ -154,8 +97,7 @@ def evaluate(model, loader, max_batches=None):
     for i, batch in enumerate(loader):
         if max_batches and i >= max_batches:
             break
-        
-        loss = a2s_loss(model, batch)
+        loss = s2a_loss(model, batch)
         losses.append(float(loss))
     
     return np.mean(losses) if losses else 0.0
@@ -216,75 +158,34 @@ def plot_losses(train_losses, val_losses, log_dir, epoch, best_val_loss, best_ep
     plt.savefig(log_dir / "plots" / f"losses_epoch_{epoch:04d}.png", dpi=150)
     plt.close()
 
-
-# def count_parameters(state_dict):
-#     """Count parameters from a state dict"""
-#     param_count = 0
-#     for leaf in jax.tree_util.tree_leaves(state_dict):
-#         if hasattr(leaf, 'value'):
-#             param_count += leaf.value.size
-#         elif hasattr(leaf, 'size'):
-#             param_count += leaf.size
-#         else:
-#             param_count += jnp.array(leaf).size
-#     return param_count
-
-
-# def count_trainable_vs_frozen(model):
-#     """Count trainable vs frozen parameters"""
-#     state = nnx.state(model)
-    
-#     trainable_count = 0
-#     frozen_count = 0
-    
-#     # Count Param (trainable) vs Variable (frozen)
-#     for path, value in jax.tree_util.tree_leaves_with_path(state):
-#         if isinstance(value, nnx.Param):
-#             trainable_count += value.value.size
-#         elif isinstance(value, nnx.Variable):
-#             frozen_count += value.value.size
-    
-#     return trainable_count, frozen_count
-
-
-# def train_action2sound(args):
-#     """Main training function for Action2Sound model"""
-    
-#     # Set random seeds
+# def train_sound_ae(args):
 #     np.random.seed(args.seed)
 #     jax.random.PRNGKey(args.seed)
-    
-#     # Create log directory
 #     log_dir = create_log_dir()
-    
-#     # Save config
 #     config = vars(args)
 #     with open(log_dir / "config.txt", 'w') as f:
 #         for k, v in config.items():
 #             f.write(f"{k}: {v}\n")
     
 #     print(f"\n{'='*60}")
-#     print(f"Training Action2Sound Model")
+#     print(f"Training Sound Autoencoder")
 #     print(f"{'='*60}")
 #     print(f"Log directory: {log_dir}")
-    
-#     # Load dataset
-#     npz_path = args.data_path
+
+#     npz_path = args.path_name
 #     dataset = NPZSequenceDatasetJAX(
-#         npz_path,
+#         path_like=npz_path,
 #         steps_per_episode=512,
-#         sequence_length=args.seq_len,
+#         sequence_length=10,
 #         normalize_sa=True,
 #         specs_scale_01=True,
-#         specs_downsample_hw=(128, 128)
+#         specs_downsample_hw=(128,128)
 #     )
     
-#     # Create dataloaders (70/20/10 split)
 #     train_loader = JAXEpochLoader(dataset, batch_size=args.batch_size, shuffle=True, seed=args.seed)
 #     val_loader = JAXEpochLoader(dataset, batch_size=args.batch_size, shuffle=False, seed=args.seed + 1)
 #     test_loader = JAXEpochLoader(dataset, batch_size=args.batch_size, shuffle=False, seed=args.seed + 2)
     
-#     # Get data dimensions
 #     sample_batch = next(iter(train_loader))
 #     state_dim = sample_batch['states'].shape[-1]
 #     action_dim = sample_batch['actions'].shape[-1]
@@ -295,67 +196,65 @@ def plot_losses(train_losses, val_losses, log_dir, epoch, best_val_loss, best_ep
 #     print(f"  Action dim: {action_dim}")
 #     print(f"  Input dim (state+action): {input_dim}")
 #     print(f"  Sequence length: {args.seq_len}")
-    
-#     # Load pretrained autoencoder (FROZEN)
-#     ae = load_pretrained_autoencoder(
-#         checkpoint_path=args.ae_checkpoint,
+
+#     rngs = nnx.Rngs(args.seed)
+#     model = SoundAE(
 #         latent_dim=args.latent_dim,
 #         input_shape=(128, 128, 3),
-#         seed=args.seed
+#         rngs=rngs
 #     )
-    
-#     # Create Action2Sound model
-#     rngs = nnx.Rngs(args.seed)
-#     dummy_input = jnp.ones((1, args.seq_len, input_dim))
-#     a2s_model = Action2Sound(ae, dummy_input.shape, args.latent_dim, rngs=rngs)
-    
-#     print(f"\n✓ Created Action2Sound model")    
-    
-#     # CRITICAL: Create optimizer that ONLY optimizes Action2Sound parameters
-#     # This ensures autoencoder stays frozen
-#     optimizer = nnx.Optimizer(a2s_model, optax.adam(args.lr), wrt=nnx.Param)
-    
-#     print(f"\n✓ Optimizer created (autoencoder parameters excluded)")
-    
-#     # Verify autoencoder is frozen by checking gradients don't flow to it
-#     # (gradients will be None or zero for frozen params)
-    
-#     # Training loop
+#     optimizer = nnx.Optimizer(model, optax.adam(args.lr), wrt=nnx.Param)
+
 #     train_losses = []
 #     val_losses = []
 #     best_val_loss = float('inf')
 #     best_epoch = 0
-    
-#     print(f"\nStarting training for {args.epochs} epochs...")
-#     print(f"{'='*60}\n")
-    
+
+#     from src.losses import sound_error
+
 #     for epoch in range(args.epochs):
 #         epoch_start = time.time()
 #         epoch_train_losses = []
         
-#         # Training
 #         for batch_idx, batch in enumerate(train_loader):
-#             loss, grads = nnx.value_and_grad(a2s_loss)(a2s_model, batch)
+#             spectrograms = batch["spectrograms"]
+#             T, B, C, H, W = spectrograms.shape
             
-#             # Update only trainable parameters (autoencoder is excluded automatically)
-#             optimizer.update(grads=grads, model=a2s_model)
+#             specs_batch = spectrograms.reshape(T * B, C, H, W)
+#             specs_batch = jnp.transpose(specs_batch, (0, 2, 3, 1))
+            
+#             def ae_loss_fn(model):
+#                 reconstructed, latent = model(specs_batch)
+#                 loss = jnp.mean((reconstructed - specs_batch) ** 2)
+#                 return loss
+            
+#             loss, grads = nnx.value_and_grad(ae_loss_fn)(model)
+#             optimizer.update(grads=grads, model=model)
+            
 #             epoch_train_losses.append(float(loss))
         
 #         avg_train_loss = np.mean(epoch_train_losses)
 #         train_losses.append(avg_train_loss)
         
-#         # Validation
-#         avg_val_loss = evaluate(a2s_model, val_loader, max_batches=10)
+#         val_losses_batch = []
+#         for val_batch in val_loader:
+#             spectrograms = val_batch["spectrograms"]
+#             T, B, C, H, W = spectrograms.shape
+#             specs_batch = spectrograms.reshape(T * B, C, H, W)
+#             specs_batch = jnp.transpose(specs_batch, (0, 2, 3, 1))
+            
+#             reconstructed, latent = model(specs_batch)
+#             val_loss = jnp.mean((reconstructed - specs_batch) ** 2)
+#             val_losses_batch.append(float(val_loss))
+        
+#         avg_val_loss = np.mean(val_losses_batch)
 #         val_losses.append(avg_val_loss)
         
-#         # Track best model
 #         if avg_val_loss < best_val_loss:
 #             best_val_loss = avg_val_loss
-#             best_epoch = epoch + 1
-            
-#             # Save best model (only Action2Sound parameters)
-#             with open(log_dir / "checkpoints" / "action2sound_best.pkl", "wb") as f:
-#                 pickle.dump(nnx.state(a2s_model), f)
+#             best_epoch = epoch + 1      
+#             with open(log_dir / "checkpoints" / "sound_autoencoder_best.pkl", "wb") as f:
+#                 pickle.dump(nnx.state(model), f)
         
 #         epoch_time = time.time() - epoch_start
         
@@ -363,33 +262,37 @@ def plot_losses(train_losses, val_losses, log_dir, epoch, best_val_loss, best_ep
 #               f"Train: {avg_train_loss:.6f} | Val: {avg_val_loss:.6f} | "
 #               f"Best: {best_val_loss:.6f} (ep {best_epoch})")
         
-#         # Plot every 10 epochs
 #         if (epoch + 1) % 10 == 0:
-#             plot_losses(train_losses, val_losses, log_dir, epoch + 1, best_val_loss, best_epoch)
-            
-#             # Save periodic checkpoint
-#             with open(log_dir / "checkpoints" / f"action2sound_epoch_{epoch+1}.pkl", "wb") as f:
-#                 pickle.dump(nnx.state(a2s_model), f)
+#             plot_losses(train_losses, val_losses, log_dir, epoch + 1, best_val_loss, best_epoch)   
+#             with open(log_dir / "checkpoints" / f"sound_ae_epoch_{epoch+1}.pkl", "wb") as f:
+#                 pickle.dump(nnx.state(model), f)
     
-#     # Load best model and evaluate on test set
 #     print(f"\nLoading best model from epoch {best_epoch}...")
-#     with open(log_dir / "checkpoints" / "action2sound_best.pkl", "rb") as f:
-#         nnx.update(a2s_model, pickle.load(f))
+#     with open(log_dir / "checkpoints" / "sound_autoencoder_best.pkl", "rb") as f:
+#         nnx.update(model, pickle.load(f))
     
-#     test_loss = evaluate(a2s_model, test_loader, max_batches=None)
+#     test_losses_batch = []
+#     for test_batch in test_loader:
+#         spectrograms = test_batch["spectrograms"]
+#         T, B, C, H, W = spectrograms.shape
+#         specs_batch = spectrograms.reshape(T * B, C, H, W)
+#         specs_batch = jnp.transpose(specs_batch, (0, 2, 3, 1))
+        
+#         reconstructed, latent = model(specs_batch)
+#         test_loss = jnp.mean((reconstructed - specs_batch) ** 2)
+#         test_losses_batch.append(float(test_loss))
     
-#     # Save final model and results
-#     with open(log_dir / "checkpoints" / "action2sound_final.pkl", "wb") as f:
-#         pickle.dump(nnx.state(a2s_model), f)
+#     avg_test_loss = np.mean(test_losses_batch)
     
-#     # Plot final results
+#     with open(log_dir / "checkpoints" / "sound_autoencoder_final.pkl", "wb") as f:
+#         pickle.dump(nnx.state(model), f)
+    
 #     plot_losses(train_losses, val_losses, log_dir, args.epochs, best_val_loss, best_epoch)
     
-#     # Save training history
 #     history = {
 #         'train_losses': train_losses,
 #         'val_losses': val_losses,
-#         'test_loss': test_loss,
+#         'test_loss': avg_test_loss,
 #         'best_val_loss': best_val_loss,
 #         'best_epoch': best_epoch,
 #         'args': config
@@ -403,18 +306,157 @@ def plot_losses(train_losses, val_losses, log_dir, epoch, best_val_loss, best_ep
 #     print(f"Best validation loss: {best_val_loss:.6f} (epoch {best_epoch})")
 #     print(f"Final train loss: {train_losses[-1]:.6f}")
 #     print(f"Final val loss: {val_losses[-1]:.6f}")
-#     print(f"Test loss: {test_loss:.6f}")
+#     print(f"Test loss: {avg_test_loss:.6f}")
 #     print(f"\nSaved to: {log_dir}")
 #     print(f"{'='*60}\n")
+
+
+def train_action2sound(args):
+    """Main training function for Action2Sound model"""
+    
+    np.random.seed(args.seed)
+    jax.random.PRNGKey(args.seed)
+    
+    log_dir = create_log_dir()
+    
+    config = vars(args)
+    with open(log_dir / "config.txt", 'w') as f:
+        for k, v in config.items():
+            f.write(f"{k}: {v}\n")
+    
+    print(f"\n{'='*60}")
+    print(f"Training Action2Sound Model")
+    print(f"{'='*60}")
+    print(f"Log directory: {log_dir}")
+    
+    npz_path = args.data_path
+    dataset = NPZSequenceDatasetJAX(
+        npz_path,
+        steps_per_episode=512,
+        sequence_length=args.seq_len,
+        normalize_sa=True,
+        specs_scale_01=True,
+        specs_downsample_hw=(128, 128)
+    )
+    
+    train_loader = JAXEpochLoader(dataset, batch_size=args.batch_size, shuffle=True, seed=args.seed)
+    val_loader = JAXEpochLoader(dataset, batch_size=args.batch_size, shuffle=False, seed=args.seed + 1)
+    test_loader = JAXEpochLoader(dataset, batch_size=args.batch_size, shuffle=False, seed=args.seed + 2)
+    
+    sample_batch = next(iter(train_loader))
+    state_dim = sample_batch['states'].shape[-1]
+    action_dim = sample_batch['actions'].shape[-1]
+    
+    print(f"\nData dimensions:")
+    print(f"  State dim: {state_dim}")
+    print(f"  Action dim: {action_dim}")
+    print(f"  Sequence length: {args.seq_len}")
+    
+    ae = load_pretrained_autoencoder(
+        checkpoint_path=args.ae_checkpoint,
+        latent_dim=args.latent_dim,
+        input_shape=(128, 128, 3),
+        seed=args.seed
+    )
+    
+    rngs = nnx.Rngs(args.seed)
+    a2s_model = Action2Sound(
+        sound_autoencoder=ae,
+        seq_len=args.seq_len,
+        action_dim=action_dim,
+        latent_dim=args.latent_dim,
+        rngs=rngs
+    )
+    
+    print(f"\n✓ Created Action2Sound model")    
+    
+    optimizer = nnx.Optimizer(a2s_model, optax.adam(args.lr), wrt=nnx.Param)
+    
+    print(f"\n✓ Optimizer created (autoencoder parameters excluded)")
+
+    train_losses = []
+    val_losses = []
+    best_val_loss = float('inf')
+    best_epoch = 0
+    
+    print(f"\nStarting training for {args.epochs} epochs...")
+    print(f"{'='*60}\n")
+    
+    for epoch in range(args.epochs):
+        epoch_start = time.time()
+        epoch_train_losses = []
+        
+        for batch_idx, batch in enumerate(train_loader):
+            loss, grads = nnx.value_and_grad(a2s_loss)(a2s_model, batch)
+            
+            optimizer.update(grads=grads, model=a2s_model)
+            epoch_train_losses.append(float(loss))
+        
+        avg_train_loss = np.mean(epoch_train_losses)
+        train_losses.append(avg_train_loss)
+        
+        avg_val_loss = evaluate(a2s_model, val_loader, max_batches=10)
+        val_losses.append(avg_val_loss)
+        
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            best_epoch = epoch + 1
+            
+            with open(log_dir / "checkpoints" / "action2sound_best.pkl", "wb") as f:
+                pickle.dump(nnx.state(a2s_model), f)
+        
+        epoch_time = time.time() - epoch_start
+        
+        print(f"Epoch {epoch + 1}/{args.epochs} ({epoch_time:.1f}s) | "
+              f"Train: {avg_train_loss:.6f} | Val: {avg_val_loss:.6f} | "
+              f"Best: {best_val_loss:.6f} (ep {best_epoch})")
+        
+        if (epoch + 1) % 10 == 0:
+            plot_losses(train_losses, val_losses, log_dir, epoch + 1, best_val_loss, best_epoch)
+            
+            with open(log_dir / "checkpoints" / f"action2sound_epoch_{epoch+1}.pkl", "wb") as f:
+                pickle.dump(nnx.state(a2s_model), f)
+    
+    print(f"\nLoading best model from epoch {best_epoch}...")
+    with open(log_dir / "checkpoints" / "action2sound_best.pkl", "rb") as f:
+        nnx.update(a2s_model, pickle.load(f))
+    
+    test_loss = evaluate(a2s_model, test_loader, max_batches=None)
+    
+    with open(log_dir / "checkpoints" / "action2sound_final.pkl", "wb") as f:
+        pickle.dump(nnx.state(a2s_model), f)
+    
+    plot_losses(train_losses, val_losses, log_dir, args.epochs, best_val_loss, best_epoch)
+    
+    history = {
+        'train_losses': train_losses,
+        'val_losses': val_losses,
+        'test_loss': test_loss,
+        'best_val_loss': best_val_loss,
+        'best_epoch': best_epoch,
+        'args': config
+    }
+    with open(log_dir / "training_history.pkl", "wb") as f:
+        pickle.dump(history, f)
+    
+    print(f"\n{'='*60}")
+    print(f"Training Complete!")
+    print(f"{'='*60}")
+    print(f"Best validation loss: {best_val_loss:.6f} (epoch {best_epoch})")
+    print(f"Final train loss: {train_losses[-1]:.6f}")
+    print(f"Final val loss: {val_losses[-1]:.6f}")
+    print(f"Test loss: {test_loss:.6f}")
+    print(f"\nSaved to: {log_dir}")
+    print(f"{'='*60}\n")
 
 
 # def main():
 #     parser = argparse.ArgumentParser(description='Train Action2Sound Model')
 #     parser.add_argument('--data_path', type=str, 
-#                        default="data/Ant-v5/2025-10-25_13-19-10_seed42/rollout.npz",
+#                        default="data/Ant-v5/2025-11-14_13-42-20_seed13/rollout.npz",
 #                        help='Path to dataset')
 #     parser.add_argument('--ae_checkpoint', type=str,
-#                        default="checkpoints/sound_autoencoder_best.pkl",
+#                        default="Logs/run_2025-11-14_18-13-00/checkpoints/sound_autoencoder_best.pkl",
 #                        help='Path to pretrained autoencoder')
 #     parser.add_argument('--epochs', type=int, default=200, help='Number of epochs')
 #     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
@@ -429,49 +471,6 @@ def plot_losses(train_losses, val_losses, log_dir, epoch, best_val_loss, best_ep
 
 # if __name__ == "__main__":
 #     main()
-
-def s2a_loss(model, batch):
-    """
-    Compute loss for Sound2Action model
-    
-    Args:
-        model: Sound2Action model
-        batch: Dict with 'states', 'actions', 'spectrograms'
-    
-    Returns:
-        loss: MSE between predicted and true actions
-    """
-    actions = batch["actions"]  # (T, B, action_dim)
-    spectrograms = batch["spectrograms"]  # (T, B, C, H, W)
-    
-    T, B = actions.shape[:2]
-    
-    # Reshape spectrograms: (T, B, C, H, W) -> (T*B, H, W, C)
-    C, H, W = spectrograms.shape[2:]
-    specs_reshaped = spectrograms.reshape(T * B, C, H, W)
-    specs_reshaped = jnp.transpose(specs_reshaped, (0, 2, 3, 1))  # (T*B, H, W, C)
-    
-    # Reshape actions: (T, B, action_dim) -> (T*B, action_dim)  
-    actions_flat = actions.reshape(T * B, -1)
-    
-    # Process each spectrogram through the model
-    total_loss = 0.0
-    for i in range(specs_reshaped.shape[0]):
-        spec = specs_reshaped[i]  # (H, W, C)
-        target_action = actions_flat[i]  # (action_dim,)
-        
-        pred_action_seq = model(spec)  # (T_model, action_dim)
-        
-        # Take first timestep prediction (or mean, or specific timestep)
-        pred_action = pred_action_seq[0]  # (action_dim,)
-        
-        # MSE loss for this sample
-        total_loss += jnp.mean((pred_action - target_action) ** 2)
-    
-    # Average over batch
-    loss = total_loss / specs_reshaped.shape[0]
-    
-    return loss
 
 
 def create_s2a_log_dir():
@@ -516,7 +515,7 @@ def train_sound2action(args):
         specs_downsample_hw=(128, 128)
     )
     
-    # Create dataloaders (70/20/10 split)
+    # Create dataloaders
     train_loader = JAXEpochLoader(dataset, batch_size=args.batch_size, shuffle=True, seed=args.seed)
     val_loader = JAXEpochLoader(dataset, batch_size=args.batch_size, shuffle=False, seed=args.seed + 1)
     test_loader = JAXEpochLoader(dataset, batch_size=args.batch_size, shuffle=False, seed=args.seed + 2)
@@ -529,7 +528,7 @@ def train_sound2action(args):
     print(f"  Action dim: {action_dim}")
     print(f"  Sequence length: {args.seq_len}")
     
-    # Load pretrained autoencoder (FROZEN)
+    # Load pretrained, frozen autoencoder
     ae = load_pretrained_autoencoder(
         checkpoint_path=args.ae_checkpoint,
         latent_dim=args.latent_dim,
@@ -546,14 +545,8 @@ def train_sound2action(args):
         action_dim=action_dim,
         rngs=rngs
     )
-    
-    print(f"\n✓ Created Sound2Action model")
-    
-  
-    # Create optimizer that ONLY optimizes Sound2Action parameters
+
     optimizer = nnx.Optimizer(s2a_model, optax.adam(args.lr), wrt=nnx.Param)
-    
-    print(f"\n✓ Optimizer created (autoencoder parameters excluded)")
     
     # Training loop
     train_losses = []
@@ -571,8 +564,6 @@ def train_sound2action(args):
         # Training
         for batch_idx, batch in enumerate(train_loader):
             loss, grads = nnx.value_and_grad(s2a_loss)(s2a_model, batch)
-            
-            # Update only trainable parameters (autoencoder is excluded automatically)
             optimizer.update(grads=grads, model=s2a_model)
             epoch_train_losses.append(float(loss))
         
@@ -588,7 +579,7 @@ def train_sound2action(args):
             best_val_loss = avg_val_loss
             best_epoch = epoch + 1
             
-            # Save best model (only Sound2Action parameters)
+            # Save best model
             with open(log_dir / "checkpoints" / "sound2action_best.pkl", "wb") as f:
                 pickle.dump(nnx.state(s2a_model), f)
         
@@ -642,16 +633,13 @@ def train_sound2action(args):
     print(f"\nSaved to: {log_dir}")
     print(f"{'='*60}\n")
 
-
 # def main():
-#     parser = argparse.ArgumentParser(description='Train Action2Sound or Sound2Action Model')
-#     parser.add_argument('--mode', type=str, choices=['a2s', 's2a'], default='a2s',
-#                        help='Training mode: a2s (Action2Sound) or s2a (Sound2Action)')
+#     parser = argparse.ArgumentParser(description='Train Models')
 #     parser.add_argument('--data_path', type=str, 
-#                        default="data/Ant-v5/2025-10-25_13-19-10_seed42/rollout.npz",
+#                        default="data/Ant-v5/2025-11-14_13-42-20_seed13/rollout.npz",
 #                        help='Path to dataset')
 #     parser.add_argument('--ae_checkpoint', type=str,
-#                        default="checkpoints/sound_autoencoder_best.pkl",
+#                        default="Logs/run_2025-11-14_18-13-00/checkpoints/sound_autoencoder_best.pkl",
 #                        help='Path to pretrained autoencoder')
 #     parser.add_argument('--epochs', type=int, default=200, help='Number of epochs')
 #     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
@@ -664,16 +652,162 @@ def train_sound2action(args):
     
 #     train_sound2action(args)
 
+
+# if __name__ == "__main__":
+#     main()
+
+def test_action2sound_prediction(args):
+    """Test Action2Sound model by predicting final image from initial image + actions"""
+    
+    print(f"\n{'='*60}")
+    print(f"Testing Action2Vision Model")
+    print(f"{'='*60}")
+    
+    # Load dataset
+    npz_path = args.data_path
+    dataset = NPZSequenceDatasetJAX(
+        npz_path,
+        steps_per_episode=512,
+        sequence_length=args.seq_len,
+        normalize_sa=True,
+        specs_scale_01=True,
+        specs_downsample_hw=(128, 128)
+    )
+    
+    # Get a random sample
+    random_idx = np.random.randint(0, len(dataset))
+    sample = dataset[random_idx]
+    
+    print(f"\nSample index: {random_idx}")
+    print(f"States shape: {sample['states'].shape}")
+    print(f"Actions shape: {sample['actions'].shape}")
+    print(f"Spectrograms shape: {sample['spectrograms'].shape}")
+    
+    # Extract data
+    actions = sample["actions"]  # (T, action_dim)
+    specs = sample["spectrograms"]  # (T, C, H, W)
+    
+    # Get initial and final spectrograms
+    initial_spec = specs[0]  # (C, H, W)
+    final_spec = specs[-1]   # (C, H, W)
+    
+    # Convert to (H, W, C) for models
+    initial_spec_hwc = jnp.transpose(initial_spec, (1, 2, 0))  # (128, 128, 3)
+    final_spec_hwc = jnp.transpose(final_spec, (1, 2, 0))
+    
+    # Add batch dimension
+    actions_batch = actions[None, ...]  # (1, T, action_dim)
+    initial_batch = initial_spec_hwc[None, ...]  # (1, 128, 128, 3)
+    
+    print(f"\nInitial spec range: [{initial_spec_hwc.min():.3f}, {initial_spec_hwc.max():.3f}]")
+    print(f"Final spec range: [{final_spec_hwc.min():.3f}, {final_spec_hwc.max():.3f}]")
+    print(f"Actions range: [{actions.min():.3f}, {actions.max():.3f}]")
+    
+    # Load pretrained autoencoder
+    ae = load_pretrained_autoencoder(
+        checkpoint_path=args.ae_checkpoint,
+        latent_dim=args.latent_dim,
+        input_shape=(128, 128, 3),
+        seed=args.seed
+    )
+    
+    # Load Action2Sound model
+    rngs = nnx.Rngs(args.seed)
+    action_dim = actions.shape[-1]
+    
+    a2s_model = Action2Sound(
+        sound_autoencoder=ae,
+        seq_len=args.seq_len,
+        action_dim=action_dim,
+        latent_dim=args.latent_dim,
+        rngs=rngs
+    )
+    
+    # Load trained weights
+    print(f"\nLoading A2S model from: {args.a2s_checkpoint}")
+    with open(args.a2s_checkpoint, "rb") as f:
+        nnx.update(a2s_model, pickle.load(f))
+    
+    print(f"✓ Loaded Action2Sound model")
+    
+    # Predict final spectrogram
+    # Model expects: (B, T, action_dim) and (B, H, W, C)
+    predicted_spec = a2s_model(actions_batch, initial_batch)  # (1, H, W, C)
+    predicted_spec = predicted_spec[0]  # Remove batch dim: (H, W, C)
+    
+    print(f"\nPredicted spec shape: {predicted_spec.shape}")
+    print(f"Predicted spec range: [{predicted_spec.min():.3f}, {predicted_spec.max():.3f}]")
+    
+    # Compute prediction error
+    mse = jnp.mean((predicted_spec - final_spec_hwc) ** 2)
+    print(f"Prediction MSE: {mse:.6f}")
+    
+    # Plot comparison
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    
+    # Row 1: Initial, Final (True), Predicted
+    axes[0, 0].imshow(np.array(initial_spec_hwc))
+    axes[0, 0].set_title('Initial Image (t=0)', fontsize=14, fontweight='bold')
+    axes[0, 0].axis('off')
+    
+    axes[0, 1].imshow(np.array(final_spec_hwc))
+    axes[0, 1].set_title(f'True Final Image (t={args.seq_len})', fontsize=14, fontweight='bold')
+    axes[0, 1].axis('off')
+    
+    predicted_np = np.array(predicted_spec)
+    predicted_np = np.clip(predicted_np, 0, 1)
+    axes[0, 2].imshow(predicted_np)
+    axes[0, 2].set_title('Predicted Final Image', fontsize=14, fontweight='bold')
+    axes[0, 2].axis('off')
+    
+    true_change = np.abs(np.array(final_spec_hwc) - np.array(initial_spec_hwc))
+    pred_change = np.abs(predicted_np - np.array(initial_spec_hwc))
+    
+    axes[1, 0].imshow(true_change * 3)
+    axes[1, 0].set_title('True Change (3x)', fontsize=12)
+    axes[1, 0].axis('off')
+    
+    axes[1, 1].imshow(pred_change * 3)
+    axes[1, 1].set_title('Predicted Change (3x)', fontsize=12)
+    axes[1, 1].axis('off')
+    
+    diff = np.abs(np.array(final_spec_hwc) - predicted_np)
+    axes[1, 2].imshow(diff * 5)
+    axes[1, 2].set_title(f'Prediction Error (5x)\nMSE: {mse:.6f}', fontsize=12)
+    axes[1, 2].axis('off')
+    
+    fig.suptitle(f'Action2Vision Prediction Test (seq_len={args.seq_len})', 
+                 fontsize=16, fontweight='bold', y=0.98)
+    
+    plt.tight_layout()
+    
+    save_path = Path("action2sound_test_prediction.png")
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    print(f"\nSaved comparison plot to: {save_path}")
+    plt.show()
+    
+    print(f"\nAction sequence statistics:")
+    print(f"  Mean action magnitude: {jnp.abs(actions).mean():.4f}")
+    print(f"  Max action magnitude: {jnp.abs(actions).max():.4f}")
+    print(f"  Action std: {actions.std():.4f}")
+    
+    print(f"{'='*60}\n")
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Train Action2Sound or Sound2Action Model')
-    parser.add_argument('--mode', type=str, choices=['a2s', 's2a'], default='a2s',
-                       help='Training mode: a2s (Action2Sound) or s2a (Sound2Action)')
+    parser = argparse.ArgumentParser(description='Train Models')
+    parser.add_argument('--mode', type=str, default='test_ae',
+                       choices=['train_s2a', 'test_ae', 'test_a2s'],
+                       help='Mode: train_s2a, test_ae, or test_a2s')
     parser.add_argument('--data_path', type=str, 
-                       default="data/Ant-v5/2025-10-25_13-19-10_seed42/rollout.npz",
+                       default="data/Ant-v5/2025-11-14_13-42-20_seed13/rollout.npz",
                        help='Path to dataset')
     parser.add_argument('--ae_checkpoint', type=str,
-                       default="checkpoints/sound_autoencoder_best.pkl",
+                       default="Logs/run_2025-11-14_18-13-00/checkpoints/sound_autoencoder_best.pkl",
                        help='Path to pretrained autoencoder')
+    parser.add_argument('--a2s_checkpoint', type=str,
+                       default="Logs/A2S/run_2025-11-14_22-51-54/checkpoints/action2sound_final.pkl",
+                       help='Path to trained Action2Sound model')
     parser.add_argument('--epochs', type=int, default=200, help='Number of epochs')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
@@ -683,7 +817,7 @@ def main():
     
     args = parser.parse_args()
     
-    run_data_collection()
+    test_action2sound_prediction(args)
 
 
 if __name__ == "__main__":

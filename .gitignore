@@ -3,3 +3,6 @@ __pycache__
 /data
 /checkpoints
 /configs
+test.py
+view.py
+ant.xml

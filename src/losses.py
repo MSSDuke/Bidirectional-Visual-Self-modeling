@@ -53,3 +53,64 @@ def train_step(model, optimizer, batch, alpha):
     optimizer.update(grads=grads, model=model)
 
     return loss, metrics
+
+
+def a2s_loss(model, batch):
+    """
+    Compute loss for Action2Sound model
+    
+    Args:
+        model: Action2Sound model
+        batch: Dict with 'states', 'actions', 'spectrograms'
+    
+    Returns:
+        loss: MSE between predicted and true spectrograms
+    """
+    actions = batch["actions"]
+    spectrograms = batch["spectrograms"]
+    
+    T, B = actions.shape[:2]
+    C, H, W = spectrograms.shape[2:]
+    
+    state_action = jnp.concatenate([actions], axis=-1)
+    state_action = jnp.transpose(state_action, (1, 0, 2))
+    
+    initial_specs = spectrograms[0]
+    target_specs = spectrograms[-1]
+
+    initial_specs = jnp.transpose(initial_specs, (0, 2, 3, 1))
+    target_specs = jnp.transpose(target_specs, (0, 2, 3, 1))
+    
+    pred_specs = model(state_action, initial_specs)
+    
+    loss = jnp.mean((pred_specs - target_specs) ** 2)
+    return loss
+
+def s2a_loss(model, batch):
+    """
+    Compute loss for Sound2Action model
+    
+    Args:
+        model: Sound2Action model
+        batch: Dict with 'states', 'actions', 'spectrograms'
+    
+    Returns:
+        loss: MSE between predicted and true actions
+    """
+    actions = batch["actions"]
+    spectrograms = batch["spectrograms"]
+    
+    T, B = actions.shape[:2]
+    C, H, W = spectrograms.shape[2:]
+    
+    initial_specs = spectrograms[0]
+    final_specs = spectrograms[-1]
+    
+    initial_specs = jnp.transpose(initial_specs, (0, 2, 3, 1))
+    final_specs = jnp.transpose(final_specs, (0, 2, 3, 1))
+    
+    pred_actions = model(initial_specs, final_specs)
+    target_actions = jnp.transpose(actions, (1, 0, 2))
+    
+    loss = jnp.mean((pred_actions - target_actions) ** 2)
+    return loss
