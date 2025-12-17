@@ -190,12 +190,6 @@ def plot_losses(train_losses, val_losses, log_dir, epoch, best_val_loss, best_ep
 #     state_dim = sample_batch['states'].shape[-1]
 #     action_dim = sample_batch['actions'].shape[-1]
 #     input_dim = state_dim + action_dim
-    
-#     print(f"\nData dimensions:")
-#     print(f"  State dim: {state_dim}")
-#     print(f"  Action dim: {action_dim}")
-#     print(f"  Input dim (state+action): {input_dim}")
-#     print(f"  Sequence length: {args.seq_len}")
 
 #     rngs = nnx.Rngs(args.seed)
 #     model = SoundAE(
@@ -299,16 +293,6 @@ def plot_losses(train_losses, val_losses, log_dir, epoch, best_val_loss, best_ep
 #     }
 #     with open(log_dir / "training_history.pkl", "wb") as f:
 #         pickle.dump(history, f)
-    
-#     print(f"\n{'='*60}")
-#     print(f"Training Complete!")
-#     print(f"{'='*60}")
-#     print(f"Best validation loss: {best_val_loss:.6f} (epoch {best_epoch})")
-#     print(f"Final train loss: {train_losses[-1]:.6f}")
-#     print(f"Final val loss: {val_losses[-1]:.6f}")
-#     print(f"Test loss: {avg_test_loss:.6f}")
-#     print(f"\nSaved to: {log_dir}")
-#     print(f"{'='*60}\n")
 
 
 def train_action2sound(args):
@@ -347,11 +331,6 @@ def train_action2sound(args):
     state_dim = sample_batch['states'].shape[-1]
     action_dim = sample_batch['actions'].shape[-1]
     
-    print(f"\nData dimensions:")
-    print(f"  State dim: {state_dim}")
-    print(f"  Action dim: {action_dim}")
-    print(f"  Sequence length: {args.seq_len}")
-    
     ae = load_pretrained_autoencoder(
         checkpoint_path=args.ae_checkpoint,
         latent_dim=args.latent_dim,
@@ -367,12 +346,8 @@ def train_action2sound(args):
         latent_dim=args.latent_dim,
         rngs=rngs
     )
-    
-    print(f"\n✓ Created Action2Sound model")    
-    
+        
     optimizer = nnx.Optimizer(a2s_model, optax.adam(args.lr), wrt=nnx.Param)
-    
-    print(f"\n✓ Optimizer created (autoencoder parameters excluded)")
 
     train_losses = []
     val_losses = []
@@ -439,15 +414,7 @@ def train_action2sound(args):
     with open(log_dir / "training_history.pkl", "wb") as f:
         pickle.dump(history, f)
     
-    print(f"\n{'='*60}")
-    print(f"Training Complete!")
-    print(f"{'='*60}")
-    print(f"Best validation loss: {best_val_loss:.6f} (epoch {best_epoch})")
-    print(f"Final train loss: {train_losses[-1]:.6f}")
-    print(f"Final val loss: {val_losses[-1]:.6f}")
-    print(f"Test loss: {test_loss:.6f}")
-    print(f"\nSaved to: {log_dir}")
-    print(f"{'='*60}\n")
+    print("Finished training, results saved")
 
 
 # def main():
@@ -504,7 +471,6 @@ def train_sound2action(args):
     print(f"{'='*60}")
     print(f"Log directory: {log_dir}")
     
-    # Load dataset
     npz_path = args.data_path
     dataset = NPZSequenceDatasetJAX(
         npz_path,
@@ -515,12 +481,10 @@ def train_sound2action(args):
         specs_downsample_hw=(128, 128)
     )
     
-    # Create dataloaders
     train_loader = JAXEpochLoader(dataset, batch_size=args.batch_size, shuffle=True, seed=args.seed)
     val_loader = JAXEpochLoader(dataset, batch_size=args.batch_size, shuffle=False, seed=args.seed + 1)
     test_loader = JAXEpochLoader(dataset, batch_size=args.batch_size, shuffle=False, seed=args.seed + 2)
     
-    # Get data dimensions
     sample_batch = next(iter(train_loader))
     action_dim = sample_batch['actions'].shape[-1]
     
@@ -528,7 +492,6 @@ def train_sound2action(args):
     print(f"  Action dim: {action_dim}")
     print(f"  Sequence length: {args.seq_len}")
     
-    # Load pretrained, frozen autoencoder
     ae = load_pretrained_autoencoder(
         checkpoint_path=args.ae_checkpoint,
         latent_dim=args.latent_dim,
@@ -536,7 +499,6 @@ def train_sound2action(args):
         seed=args.seed
     )
     
-    # Create Sound2Action model
     rngs = nnx.Rngs(args.seed)
     s2a_model = Sound2Action(
         sound_autoencoder=ae,
@@ -548,7 +510,6 @@ def train_sound2action(args):
 
     optimizer = nnx.Optimizer(s2a_model, optax.adam(args.lr), wrt=nnx.Param)
     
-    # Training loop
     train_losses = []
     val_losses = []
     best_val_loss = float('inf')
@@ -561,7 +522,6 @@ def train_sound2action(args):
         epoch_start = time.time()
         epoch_train_losses = []
         
-        # Training
         for batch_idx, batch in enumerate(train_loader):
             loss, grads = nnx.value_and_grad(s2a_loss)(s2a_model, batch)
             optimizer.update(grads=grads, model=s2a_model)
@@ -570,16 +530,13 @@ def train_sound2action(args):
         avg_train_loss = np.mean(epoch_train_losses)
         train_losses.append(avg_train_loss)
         
-        # Validation
         avg_val_loss = evaluate(s2a_model, val_loader, max_batches=10)
         val_losses.append(avg_val_loss)
         
-        # Track best model
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             best_epoch = epoch + 1
             
-            # Save best model
             with open(log_dir / "checkpoints" / "sound2action_best.pkl", "wb") as f:
                 pickle.dump(nnx.state(s2a_model), f)
         
@@ -589,29 +546,23 @@ def train_sound2action(args):
               f"Train: {avg_train_loss:.6f} | Val: {avg_val_loss:.6f} | "
               f"Best: {best_val_loss:.6f} (ep {best_epoch})")
         
-        # Plot every 10 epochs
         if (epoch + 1) % 10 == 0:
             plot_losses(train_losses, val_losses, log_dir, epoch + 1, best_val_loss, best_epoch)
             
-            # Save periodic checkpoint
             with open(log_dir / "checkpoints" / f"sound2action_epoch_{epoch+1}.pkl", "wb") as f:
                 pickle.dump(nnx.state(s2a_model), f)
     
-    # Load best model and evaluate on test set
     print(f"\nLoading best model from epoch {best_epoch}...")
     with open(log_dir / "checkpoints" / "sound2action_best.pkl", "rb") as f:
         nnx.update(s2a_model, pickle.load(f))
     
     test_loss = evaluate(s2a_model, test_loader, max_batches=None)
     
-    # Save final model and results
     with open(log_dir / "checkpoints" / "sound2action_final.pkl", "wb") as f:
         pickle.dump(nnx.state(s2a_model), f)
     
-    # Plot final results
     plot_losses(train_losses, val_losses, log_dir, args.epochs, best_val_loss, best_epoch)
     
-    # Save training history
     history = {
         'train_losses': train_losses,
         'val_losses': val_losses,
@@ -622,16 +573,8 @@ def train_sound2action(args):
     }
     with open(log_dir / "training_history.pkl", "wb") as f:
         pickle.dump(history, f)
-    
-    print(f"\n{'='*60}")
-    print(f"Training Complete!")
-    print(f"{'='*60}")
-    print(f"Best validation loss: {best_val_loss:.6f} (epoch {best_epoch})")
-    print(f"Final train loss: {train_losses[-1]:.6f}")
-    print(f"Final val loss: {val_losses[-1]:.6f}")
-    print(f"Test loss: {test_loss:.6f}")
-    print(f"\nSaved to: {log_dir}")
-    print(f"{'='*60}\n")
+
+    print("Finished training, results saved")
 
 # def main():
 #     parser = argparse.ArgumentParser(description='Train Models')
@@ -659,11 +602,6 @@ def train_sound2action(args):
 def test_action2sound_prediction(args):
     """Test Action2Sound model by predicting final image from initial image + actions"""
     
-    print(f"\n{'='*60}")
-    print(f"Testing Action2Vision Model")
-    print(f"{'='*60}")
-    
-    # Load dataset
     npz_path = args.data_path
     dataset = NPZSequenceDatasetJAX(
         npz_path,
@@ -674,47 +612,28 @@ def test_action2sound_prediction(args):
         specs_downsample_hw=(128, 128)
     )
     
-    # Get a random sample
     random_idx = np.random.randint(0, len(dataset))
     sample = dataset[random_idx]
     
-    print(f"\nSample index: {random_idx}")
-    print(f"States shape: {sample['states'].shape}")
-    print(f"Actions shape: {sample['actions'].shape}")
-    print(f"Spectrograms shape: {sample['spectrograms'].shape}")
+    actions = sample["actions"]
+    specs = sample["spectrograms"]
     
-    # Extract data
-    actions = sample["actions"]  # (T, action_dim)
-    specs = sample["spectrograms"]  # (T, C, H, W)
+    initial_spec = specs[0]
+    final_spec = specs[-1]
     
-    # Get initial and final spectrograms
-    initial_spec = specs[0]  # (C, H, W)
-    final_spec = specs[-1]   # (C, H, W)
-    
-    # Convert to (H, W, C) for models
-    initial_spec_hwc = jnp.transpose(initial_spec, (1, 2, 0))  # (128, 128, 3)
+    initial_spec_hwc = jnp.transpose(initial_spec, (1, 2, 0))
     final_spec_hwc = jnp.transpose(final_spec, (1, 2, 0))
     
-    # Add batch dimension
-    actions_batch = actions[None, ...]  # (1, T, action_dim)
-    initial_batch = initial_spec_hwc[None, ...]  # (1, 128, 128, 3)
-    
-    print(f"\nInitial spec range: [{initial_spec_hwc.min():.3f}, {initial_spec_hwc.max():.3f}]")
-    print(f"Final spec range: [{final_spec_hwc.min():.3f}, {final_spec_hwc.max():.3f}]")
-    print(f"Actions range: [{actions.min():.3f}, {actions.max():.3f}]")
-    
-    # Load pretrained autoencoder
+    actions_batch = actions[None, ...]
+    initial_batch = initial_spec_hwc[None, ...]
     ae = load_pretrained_autoencoder(
         checkpoint_path=args.ae_checkpoint,
         latent_dim=args.latent_dim,
         input_shape=(128, 128, 3),
         seed=args.seed
     )
-    
-    # Load Action2Sound model
     rngs = nnx.Rngs(args.seed)
     action_dim = actions.shape[-1]
-    
     a2s_model = Action2Sound(
         sound_autoencoder=ae,
         seq_len=args.seq_len,
@@ -723,24 +642,12 @@ def test_action2sound_prediction(args):
         rngs=rngs
     )
     
-    # Load trained weights
-    print(f"\nLoading A2S model from: {args.a2s_checkpoint}")
     with open(args.a2s_checkpoint, "rb") as f:
         nnx.update(a2s_model, pickle.load(f))
-    
-    print(f"✓ Loaded Action2Sound model")
-    
-    # Predict final spectrogram
-    # Model expects: (B, T, action_dim) and (B, H, W, C)
-    predicted_spec = a2s_model(actions_batch, initial_batch)  # (1, H, W, C)
-    predicted_spec = predicted_spec[0]  # Remove batch dim: (H, W, C)
-    
-    print(f"\nPredicted spec shape: {predicted_spec.shape}")
-    print(f"Predicted spec range: [{predicted_spec.min():.3f}, {predicted_spec.max():.3f}]")
-    
-    # Compute prediction error
+    predicted_spec = a2s_model(actions_batch, initial_batch)
+    predicted_spec = predicted_spec[0]
+
     mse = jnp.mean((predicted_spec - final_spec_hwc) ** 2)
-    print(f"Prediction MSE: {mse:.6f}")
     
     # Plot comparison
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
@@ -776,22 +683,13 @@ def test_action2sound_prediction(args):
     axes[1, 2].set_title(f'Prediction Error (5x)\nMSE: {mse:.6f}', fontsize=12)
     axes[1, 2].axis('off')
     
-    fig.suptitle(f'Action2Vision Prediction Test (seq_len={args.seq_len})', 
-                 fontsize=16, fontweight='bold', y=0.98)
+    fig.suptitle(f'Action2Vision Prediction Test (seq_len={args.seq_len})', fontsize=16, fontweight='bold', y=0.98)
     
     plt.tight_layout()
     
     save_path = Path("action2sound_test_prediction.png")
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    print(f"\nSaved comparison plot to: {save_path}")
     plt.show()
-    
-    print(f"\nAction sequence statistics:")
-    print(f"  Mean action magnitude: {jnp.abs(actions).mean():.4f}")
-    print(f"  Max action magnitude: {jnp.abs(actions).max():.4f}")
-    print(f"  Action std: {actions.std():.4f}")
-    
-    print(f"{'='*60}\n")
 
 
 def main():
