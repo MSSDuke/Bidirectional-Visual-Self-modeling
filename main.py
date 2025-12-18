@@ -252,16 +252,11 @@ def plot_losses(train_losses, val_losses, log_dir, epoch, best_val_loss, best_ep
         
 #         epoch_time = time.time() - epoch_start
         
-#         print(f"Epoch {epoch + 1}/{args.epochs} ({epoch_time:.1f}s) | "
-#               f"Train: {avg_train_loss:.6f} | Val: {avg_val_loss:.6f} | "
-#               f"Best: {best_val_loss:.6f} (ep {best_epoch})")
-        
 #         if (epoch + 1) % 10 == 0:
 #             plot_losses(train_losses, val_losses, log_dir, epoch + 1, best_val_loss, best_epoch)   
 #             with open(log_dir / "checkpoints" / f"sound_ae_epoch_{epoch+1}.pkl", "wb") as f:
 #                 pickle.dump(nnx.state(model), f)
     
-#     print(f"\nLoading best model from epoch {best_epoch}...")
 #     with open(log_dir / "checkpoints" / "sound_autoencoder_best.pkl", "rb") as f:
 #         nnx.update(model, pickle.load(f))
     
@@ -354,9 +349,6 @@ def train_action2sound(args):
     best_val_loss = float('inf')
     best_epoch = 0
     
-    print(f"\nStarting training for {args.epochs} epochs...")
-    print(f"{'='*60}\n")
-    
     for epoch in range(args.epochs):
         epoch_start = time.time()
         epoch_train_losses = []
@@ -392,7 +384,6 @@ def train_action2sound(args):
             with open(log_dir / "checkpoints" / f"action2sound_epoch_{epoch+1}.pkl", "wb") as f:
                 pickle.dump(nnx.state(a2s_model), f)
     
-    print(f"\nLoading best model from epoch {best_epoch}...")
     with open(log_dir / "checkpoints" / "action2sound_best.pkl", "rb") as f:
         nnx.update(a2s_model, pickle.load(f))
     
@@ -417,29 +408,6 @@ def train_action2sound(args):
     print("Finished training, results saved")
 
 
-# def main():
-#     parser = argparse.ArgumentParser(description='Train Action2Sound Model')
-#     parser.add_argument('--data_path', type=str, 
-#                        default="data/Ant-v5/2025-11-14_13-42-20_seed13/rollout.npz",
-#                        help='Path to dataset')
-#     parser.add_argument('--ae_checkpoint', type=str,
-#                        default="Logs/run_2025-11-14_18-13-00/checkpoints/sound_autoencoder_best.pkl",
-#                        help='Path to pretrained autoencoder')
-#     parser.add_argument('--epochs', type=int, default=200, help='Number of epochs')
-#     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
-#     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
-#     parser.add_argument('--seq_len', type=int, default=10, help='Sequence length')
-#     parser.add_argument('--latent_dim', type=int, default=128, help='Latent dimension')
-#     parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    
-#     args = parser.parse_args()
-#     train_action2sound(args)
-
-
-# if __name__ == "__main__":
-#     main()
-
-
 def create_s2a_log_dir():
     """Create timestamped log directory under Logs/S2A/"""
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -453,14 +421,9 @@ def create_s2a_log_dir():
 def train_sound2action(args):
     """Main training function for Sound2Action model"""
     
-    # Set random seeds
     np.random.seed(args.seed)
-    jax.random.PRNGKey(args.seed)
-    
-    # Create log directory
+    jax.random.PRNGKey(args.seed)    
     log_dir = create_s2a_log_dir()
-    
-    # Save config
     config = vars(args)
     with open(log_dir / "config.txt", 'w') as f:
         for k, v in config.items():
@@ -488,10 +451,6 @@ def train_sound2action(args):
     sample_batch = next(iter(train_loader))
     action_dim = sample_batch['actions'].shape[-1]
     
-    print(f"\nData dimensions:")
-    print(f"  Action dim: {action_dim}")
-    print(f"  Sequence length: {args.seq_len}")
-    
     ae = load_pretrained_autoencoder(
         checkpoint_path=args.ae_checkpoint,
         latent_dim=args.latent_dim,
@@ -514,9 +473,6 @@ def train_sound2action(args):
     val_losses = []
     best_val_loss = float('inf')
     best_epoch = 0
-    
-    print(f"\nStarting training for {args.epochs} epochs...")
-    print(f"{'='*60}\n")
     
     for epoch in range(args.epochs):
         epoch_start = time.time()
@@ -552,7 +508,6 @@ def train_sound2action(args):
             with open(log_dir / "checkpoints" / f"sound2action_epoch_{epoch+1}.pkl", "wb") as f:
                 pickle.dump(nnx.state(s2a_model), f)
     
-    print(f"\nLoading best model from epoch {best_epoch}...")
     with open(log_dir / "checkpoints" / "sound2action_best.pkl", "rb") as f:
         nnx.update(s2a_model, pickle.load(f))
     
@@ -575,29 +530,6 @@ def train_sound2action(args):
         pickle.dump(history, f)
 
     print("Finished training, results saved")
-
-# def main():
-#     parser = argparse.ArgumentParser(description='Train Models')
-#     parser.add_argument('--data_path', type=str, 
-#                        default="data/Ant-v5/2025-11-14_13-42-20_seed13/rollout.npz",
-#                        help='Path to dataset')
-#     parser.add_argument('--ae_checkpoint', type=str,
-#                        default="Logs/run_2025-11-14_18-13-00/checkpoints/sound_autoencoder_best.pkl",
-#                        help='Path to pretrained autoencoder')
-#     parser.add_argument('--epochs', type=int, default=200, help='Number of epochs')
-#     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
-#     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
-#     parser.add_argument('--seq_len', type=int, default=10, help='Sequence length')
-#     parser.add_argument('--latent_dim', type=int, default=128, help='Latent dimension')
-#     parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    
-#     args = parser.parse_args()
-    
-#     train_sound2action(args)
-
-
-# if __name__ == "__main__":
-#     main()
 
 def test_action2sound_prediction(args):
     """Test Action2Sound model by predicting final image from initial image + actions"""
@@ -652,7 +584,6 @@ def test_action2sound_prediction(args):
     # Plot comparison
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
     
-    # Row 1: Initial, Final (True), Predicted
     axes[0, 0].imshow(np.array(initial_spec_hwc))
     axes[0, 0].set_title('Initial Image (t=0)', fontsize=14, fontweight='bold')
     axes[0, 0].axis('off')
